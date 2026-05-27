@@ -1,0 +1,24 @@
+[mcp_servers.mcp-unity]
+command = "node"
+args = ["Library/PackageCache/com.gamelovers.mcp-unity@a32e47d4ec87/Server~/build/index.js"]
+
+[mcp_servers.mcp-unity.tools.get_scene_info]
+approval_mode = "approve"
+
+[mcp_servers.mcp-unity.tools.recompile_scripts]
+approval_mode = "approve"
+
+[mcp_servers.mcp-unity.tools.get_console_logs]
+approval_mode = "approve"
+
+[mcp_servers.mcp-unity.tools.add_asset_to_scene]
+approval_mode = "approve"
+
+[mcp_servers.mcp-unity.tools.get_gameobject]
+approval_mode = "approve"
+
+[mcp_servers.mcp-unity.tools.delete_gameobject]
+approval_mode = "approve"
+
+[mcp_servers.mcp-unity.tools.batch_execute]
+approval_mode = "approve"
