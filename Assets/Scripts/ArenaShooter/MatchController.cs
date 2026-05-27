@@ -40,6 +40,12 @@ namespace ArenaShooter
         private const float WaveCountdownSeconds = 45f;
         private const int AllOutWarSquadSize = 4;
         private const float AllOutWarPickupRespawnSeconds = 30f;
+        private const float AllOutWarSquadResourceShareRadius = 6.5f;
+        private const float AllOutWarSquadWoundedHealthRatio = 0.72f;
+        private const float AllOutWarSquadCriticalHealthRatio = 0.38f;
+        private const float AllOutWarSquadLowAmmoRatio = 0.25f;
+        private const int AllOutWarCarriedMedPackHeal = 35;
+        private const int AllOutWarCarriedAmmoCellAmount = 18;
 
         private readonly List<WeaponPickup> activePickups = new();
         private readonly List<AmmoPickup> activeAmmoPickups = new();
@@ -232,6 +238,19 @@ namespace ArenaShooter
             public AllOutWarSquadDecision Decision = AllOutWarSquadDecision.Search;
             public Vector3 SignalPosition;
             public int SignalEnemyTeamId = -1;
+            public float AmmoRatio = 1f;
+            public int WoundedMembers;
+            public int CriticalWoundedMembers;
+            public int LowAmmoMembers;
+            public int EmptyAmmoMembers;
+            public int CarriedMedPacks;
+            public int CarriedAmmoCells;
+            public int ObjectiveVersion;
+            public int ObjectiveAssignedVersion = -1;
+            public CombatantHealth HealthRunner;
+            public CombatantHealth AmmoRunner;
+            public bool SupportContactPending;
+            public Vector3 SupportContactPosition;
         }
 
         public bool IsMatchActive { get; private set; }
@@ -799,16 +818,25 @@ namespace ArenaShooter
 
             var squad = GetAllOutWarSquadState(front, squadId);
             RefreshAllOutWarSquadHealth(front, squad);
+            EvaluateAllOutWarSquadDecision(front, squad, soldier, currentPosition);
             var currentRoom = currentLayout.GetNearestRoom(currentPosition);
             var arrived = squad.HasObjective && currentRoom == squad.ObjectiveRoom;
             var expired = squad.HasObjective && Time.time - squad.AssignedAt > 13.5f;
+            var objectiveVersionStale = squad.ObjectiveAssignedVersion != squad.ObjectiveVersion;
             MarkAllOutWarRoomSearched(teamId, currentRoom);
-            if (forceNewObjective || !squad.HasObjective || arrived || expired)
+            if (forceNewObjective || !squad.HasObjective || arrived || expired || objectiveVersionStale)
             {
+                ResolveAllOutWarSupportContactIfNeeded(squad, soldier, currentPosition, arrived || expired);
                 if (arrived && squad.HasObjective)
                 {
                     MarkAllOutWarRoomSearched(teamId, squad.ObjectiveRoom);
                     squad.LastSearchedRoom = squad.ObjectiveRoom;
+                    if (squad.Decision == AllOutWarSquadDecision.ResumeSearch)
+                    {
+                        squad.Signal = AllOutWarSquadSignal.None;
+                        squad.EngagementScale = AllOutWarEngagementScale.None;
+                        squad.Decision = AllOutWarSquadDecision.Search;
+                    }
                 }
 
                 AssignNextAllOutWarSquadObjective(front, squad, soldier, currentPosition);
@@ -866,10 +894,16 @@ namespace ArenaShooter
             squad.SignalPosition = position;
             squad.SignalEnemyTeamId = CombatantTeam.TryGetTeam(enemy, out var enemyTeamId) ? enemyTeamId : -1;
             squad.EngagementScale = DeriveAllOutWarEngagementScale(front, squad, reporter, signal, position);
-            squad.Decision = DeriveAllOutWarSquadDecision(squad, signal);
+            if (IsAllOutWarCombatSignal(signal) || signal == AllOutWarSquadSignal.ContactLost)
+            {
+                squad.SupportContactPending = false;
+            }
+
+            EvaluateAllOutWarSquadDecision(front, squad, reporter, position);
+            ReevaluateAllOutWarSupportSquads(front, squad, position, signal);
         }
 
-        public void ReportAllOutWarSquadDecision(CombatantHealth reporter, AllOutWarSquadDecision decision, Vector3 position)
+        public void ReevaluateAllOutWarSquadDecision(CombatantHealth reporter, Vector3 position)
         {
             if (currentGameMode != ArenaGameMode.AllOutWar ||
                 reporter == null ||
@@ -880,19 +914,409 @@ namespace ArenaShooter
             }
 
             var squad = GetAllOutWarSquadState(front, member.SquadId);
-            RefreshAllOutWarSquadHealth(front, squad);
-            squad.Decision = decision;
-            if (decision == AllOutWarSquadDecision.Search &&
-                (squad.Signal == AllOutWarSquadSignal.ContactLost || squad.Signal == AllOutWarSquadSignal.ResourceFound))
+            EvaluateAllOutWarSquadDecision(front, squad, reporter, position);
+        }
+
+        public int GetAllOutWarSquadObjectiveVersion(CombatantHealth memberHealth)
+        {
+            return currentGameMode == ArenaGameMode.AllOutWar &&
+                TryGetAllOutWarSquadForMember(memberHealth, out _, out var squad, out _)
+                    ? squad.ObjectiveVersion
+                    : -1;
+        }
+
+        public void ReportAllOutWarSquadLogisticsObjective(CombatantHealth reporter, Vector3 position, bool healingObjective)
+        {
+            if (currentGameMode != ArenaGameMode.AllOutWar ||
+                reporter == null ||
+                !allOutWarSquadMembers.TryGetValue(reporter, out var member) ||
+                !allOutWarFronts.TryGetValue(member.TeamId, out var front))
             {
-                squad.Signal = AllOutWarSquadSignal.None;
-                squad.EngagementScale = AllOutWarEngagementScale.None;
+                return;
             }
 
-            if (position != Vector3.zero)
+            var squad = GetAllOutWarSquadState(front, member.SquadId);
+            if (healingObjective)
             {
+                squad.HealthRunner = reporter;
+            }
+            else
+            {
+                squad.AmmoRunner = reporter;
+            }
+
+            EvaluateAllOutWarSquadDecision(front, squad, reporter, position);
+        }
+
+        public bool TryCollectAllOutWarSquadHealthPickup(CombatantHealth collector, HealthPickup pickup)
+        {
+            if (pickup == null || !TryGetAllOutWarSquadForMember(collector, out var front, out var squad, out _))
+            {
+                return false;
+            }
+
+            var previousSignal = squad.Signal;
+            var previousEngagementScale = squad.EngagementScale;
+            var previousDecision = squad.Decision;
+            var previousSignalPosition = squad.SignalPosition;
+            var previousEnemyTeamId = squad.SignalEnemyTeamId;
+            squad.CarriedMedPacks++;
+            if (squad.HealthRunner == collector)
+            {
+                squad.HealthRunner = null;
+            }
+
+            activeHealthPickups.Remove(pickup);
+            NotifyPickupPadEmptied(pickup.gameObject);
+            FinishAllOutWarResourceCollection(
+                front,
+                squad,
+                collector,
+                pickup.transform.position,
+                previousSignal,
+                previousEngagementScale,
+                previousDecision,
+                previousSignalPosition,
+                previousEnemyTeamId);
+            ReevaluateAllOutWarSupportSquads(front, squad, pickup.transform.position, AllOutWarSquadSignal.ResourceFound);
+            return true;
+        }
+
+        public bool TryCollectAllOutWarSquadAmmoPickup(CombatantHealth collector, AmmoPickup pickup)
+        {
+            if (pickup == null || !TryGetAllOutWarSquadForMember(collector, out var front, out var squad, out _))
+            {
+                return false;
+            }
+
+            var previousSignal = squad.Signal;
+            var previousEngagementScale = squad.EngagementScale;
+            var previousDecision = squad.Decision;
+            var previousSignalPosition = squad.SignalPosition;
+            var previousEnemyTeamId = squad.SignalEnemyTeamId;
+            squad.CarriedAmmoCells++;
+            if (squad.AmmoRunner == collector)
+            {
+                squad.AmmoRunner = null;
+            }
+
+            activeAmmoPickups.Remove(pickup);
+            NotifyPickupPadEmptied(pickup.gameObject);
+            FinishAllOutWarResourceCollection(
+                front,
+                squad,
+                collector,
+                pickup.transform.position,
+                previousSignal,
+                previousEngagementScale,
+                previousDecision,
+                previousSignalPosition,
+                previousEnemyTeamId);
+            ReevaluateAllOutWarSupportSquads(front, squad, pickup.transform.position, AllOutWarSquadSignal.ResourceFound);
+            return true;
+        }
+
+        public bool TryDistributeAllOutWarSquadResources(CombatantHealth requester, Vector3 position)
+        {
+            return TryDistributeAllOutWarSquadResources(requester, position, true);
+        }
+
+        private bool TryDistributeAllOutWarSquadResources(CombatantHealth requester, Vector3 position, bool reevaluateDecision)
+        {
+            if (!TryGetAllOutWarSquadForMember(requester, out var front, out var squad, out _))
+            {
+                return false;
+            }
+
+            RefreshAllOutWarSquadHealth(front, squad);
+            var usedResource = false;
+            if (squad.CarriedMedPacks > 0 && TryFindAllOutWarSquadmateNeedingMedPack(front.TeamId, squad.SquadId, position, out var wounded))
+            {
+                if (wounded.Heal(AllOutWarCarriedMedPackHeal))
+                {
+                    squad.CarriedMedPacks = Mathf.Max(0, squad.CarriedMedPacks - 1);
+                    usedResource = true;
+                }
+            }
+
+            if (squad.CarriedAmmoCells > 0 && TryFindAllOutWarSquadmateNeedingAmmo(front.TeamId, squad.SquadId, position, out var inventory))
+            {
+                if (inventory.TryAddAmmo(AllOutWarCarriedAmmoCellAmount))
+                {
+                    squad.CarriedAmmoCells = Mathf.Max(0, squad.CarriedAmmoCells - 1);
+                    usedResource = true;
+                }
+            }
+
+            if (usedResource)
+            {
+                RefreshAllOutWarSquadHealth(front, squad);
+                if (reevaluateDecision)
+                {
+                    EvaluateAllOutWarSquadDecision(front, squad, requester, position);
+                }
+            }
+            else if (reevaluateDecision &&
+                     HasUsefulAllOutWarCarriedResourceNeed(squad) &&
+                     (HasUrgentAllOutWarLogisticsNeed(squad) ||
+                      (!IsAllOutWarCombatSignal(squad.Signal) && !IsAllOutWarCombatDecision(squad.Decision))))
+            {
+                squad.Decision = AllOutWarSquadDecision.Regroup;
                 squad.SignalPosition = position;
             }
+
+            return usedResource;
+        }
+
+        private void FinishAllOutWarResourceCollection(
+            AllOutWarArmyFrontState front,
+            AllOutWarSquadFrontState squad,
+            CombatantHealth collector,
+            Vector3 resourcePosition,
+            AllOutWarSquadSignal previousSignal,
+            AllOutWarEngagementScale previousEngagementScale,
+            AllOutWarSquadDecision previousDecision,
+            Vector3 previousSignalPosition,
+            int previousEnemyTeamId)
+        {
+            TryDistributeAllOutWarSquadResources(collector, resourcePosition, false);
+            RefreshAllOutWarSquadHealth(front, squad);
+
+            var wasInCombat = IsAllOutWarCombatSignal(previousSignal) || IsAllOutWarCombatDecision(previousDecision);
+            var resourceShouldInterrupt = HasUrgentAllOutWarLogisticsNeed(squad) ||
+                (!wasInCombat && HasUsefulAllOutWarCarriedResourceNeed(squad));
+            if (resourceShouldInterrupt)
+            {
+                squad.Signal = AllOutWarSquadSignal.ResourceFound;
+                squad.SignalPosition = resourcePosition;
+                squad.SignalEnemyTeamId = -1;
+                squad.EngagementScale = AllOutWarEngagementScale.None;
+                EvaluateAllOutWarSquadDecision(front, squad, collector, resourcePosition);
+                return;
+            }
+
+            squad.Signal = previousSignal == AllOutWarSquadSignal.ResourceFound
+                ? AllOutWarSquadSignal.None
+                : previousSignal;
+            squad.EngagementScale = squad.Signal == AllOutWarSquadSignal.None
+                ? AllOutWarEngagementScale.None
+                : previousEngagementScale;
+            squad.Decision = previousDecision;
+            squad.SignalPosition = previousSignalPosition;
+            squad.SignalEnemyTeamId = squad.Signal == AllOutWarSquadSignal.None ? -1 : previousEnemyTeamId;
+            EvaluateAllOutWarSquadDecision(front, squad, collector, resourcePosition);
+        }
+
+        private void ResolveAllOutWarSupportContactIfNeeded(AllOutWarSquadFrontState squad, CombatantHealth soldier, Vector3 currentPosition, bool probeComplete)
+        {
+            if (squad == null || !squad.SupportContactPending || !probeComplete)
+            {
+                return;
+            }
+
+            var contactPosition = squad.SupportContactPosition != Vector3.zero ? squad.SupportContactPosition : currentPosition;
+            if (HasAllOutWarSupportContact(squad, soldier, contactPosition))
+            {
+                return;
+            }
+
+            squad.SupportContactPending = false;
+            squad.Signal = AllOutWarSquadSignal.ContactLost;
+            squad.SignalPosition = contactPosition;
+            squad.SignalEnemyTeamId = -1;
+            squad.EngagementScale = AllOutWarEngagementScale.None;
+            squad.Decision = AllOutWarSquadDecision.ResumeSearch;
+            squad.Phase = AllOutWarSearchPhase.Sweep;
+            IncrementAllOutWarSquadObjectiveVersion(squad);
+        }
+
+        private bool HasAllOutWarSupportContact(AllOutWarSquadFrontState squad, CombatantHealth soldier, Vector3 contactPosition)
+        {
+            if (squad != null && IsAllOutWarCombatSignal(squad.Signal))
+            {
+                return true;
+            }
+
+            if (soldier == null || !soldier.IsAlive)
+            {
+                return false;
+            }
+
+            var contactRadius = Mathf.Max(8f, roomSize * 1.1f);
+            var contactRadiusSqr = contactRadius * contactRadius;
+            var soldierPosition = soldier.transform.position;
+            var eye = soldierPosition + Vector3.up * 1.25f;
+            var targets = new List<CombatantHealth>();
+            CollectEnemyTargets(soldier, targets);
+            foreach (var target in targets)
+            {
+                if (target == null || !target.IsAlive)
+                {
+                    continue;
+                }
+
+                var fromContact = target.transform.position - contactPosition;
+                fromContact.y = 0f;
+                var fromSoldier = target.transform.position - soldierPosition;
+                fromSoldier.y = 0f;
+                if (fromContact.sqrMagnitude > contactRadiusSqr && fromSoldier.sqrMagnitude > contactRadiusSqr)
+                {
+                    continue;
+                }
+
+                var targetEye = target.transform.position + Vector3.up * 0.85f;
+                if (HasLineOfSightToCombatant(soldier, target, eye, targetEye))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasLineOfSightToCombatant(CombatantHealth seeker, CombatantHealth target, Vector3 eye, Vector3 targetEye)
+        {
+            if (target == null)
+            {
+                return false;
+            }
+
+            var toTarget = targetEye - eye;
+            if (toTarget.sqrMagnitude <= 0.01f)
+            {
+                return true;
+            }
+
+            var hits = Physics.RaycastAll(eye, toTarget.normalized, toTarget.magnitude + 0.2f, ~0, QueryTriggerInteraction.Ignore);
+            if (hits.Length == 0)
+            {
+                return true;
+            }
+
+            System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+            for (var i = 0; i < hits.Length; i++)
+            {
+                var hit = hits[i];
+                if (hit.collider == null || (seeker != null && hit.collider.transform.IsChildOf(seeker.transform)))
+                {
+                    continue;
+                }
+
+                var hitHealth = hit.collider.GetComponentInParent<CombatantHealth>();
+                if (hitHealth == target)
+                {
+                    return true;
+                }
+
+                if (hitHealth != null)
+                {
+                    return false;
+                }
+
+                var destructible = hit.collider.GetComponentInParent<DestructibleArenaPiece>();
+                if (destructible != null && destructible.AllowsProjectilePassThrough(hit.point, hit.normal))
+                {
+                    continue;
+                }
+
+                if (hit.collider.isTrigger)
+                {
+                    continue;
+                }
+
+                return false;
+            }
+
+            return false;
+        }
+
+        public bool TryClaimAllOutWarHealthRunner(CombatantHealth runner)
+        {
+            if (!TryGetAllOutWarSquadForMember(runner, out var front, out var squad, out _))
+            {
+                return false;
+            }
+
+            RefreshAllOutWarSquadHealth(front, squad);
+            if (squad.HealthRunner != null && squad.HealthRunner != runner)
+            {
+                return false;
+            }
+
+            squad.HealthRunner = runner;
+            return true;
+        }
+
+        public bool TryClaimAllOutWarAmmoRunner(CombatantHealth runner)
+        {
+            if (!TryGetAllOutWarSquadForMember(runner, out var front, out var squad, out _))
+            {
+                return false;
+            }
+
+            RefreshAllOutWarSquadHealth(front, squad);
+            if (squad.AmmoRunner != null && squad.AmmoRunner != runner)
+            {
+                return false;
+            }
+
+            squad.AmmoRunner = runner;
+            return true;
+        }
+
+        public void ReleaseAllOutWarHealthRunner(CombatantHealth runner)
+        {
+            if (TryGetAllOutWarSquadForMember(runner, out var front, out var squad, out _) && squad.HealthRunner == runner)
+            {
+                squad.HealthRunner = null;
+                EvaluateAllOutWarSquadDecision(front, squad, runner, runner != null ? runner.transform.position : Vector3.zero);
+            }
+        }
+
+        public void ReleaseAllOutWarAmmoRunner(CombatantHealth runner)
+        {
+            if (TryGetAllOutWarSquadForMember(runner, out var front, out var squad, out _) && squad.AmmoRunner == runner)
+            {
+                squad.AmmoRunner = null;
+                EvaluateAllOutWarSquadDecision(front, squad, runner, runner != null ? runner.transform.position : Vector3.zero);
+            }
+        }
+
+        public bool IsAllOutWarSquadDecision(CombatantHealth memberHealth, AllOutWarSquadDecision decision)
+        {
+            return TryGetAllOutWarSquadForMember(memberHealth, out _, out var squad, out _) && squad.Decision == decision;
+        }
+
+        public bool IsAllOutWarSquadCarryingMedPacks(CombatantHealth memberHealth)
+        {
+            return TryGetAllOutWarSquadForMember(memberHealth, out _, out var squad, out _) && squad.CarriedMedPacks > 0;
+        }
+
+        public bool IsAllOutWarSquadCarryingAmmoCells(CombatantHealth memberHealth)
+        {
+            return TryGetAllOutWarSquadForMember(memberHealth, out _, out var squad, out _) && squad.CarriedAmmoCells > 0;
+        }
+
+        private bool TryGetAllOutWarSquadForMember(
+            CombatantHealth memberHealth,
+            out AllOutWarArmyFrontState front,
+            out AllOutWarSquadFrontState squad,
+            out AllOutWarSquadMemberInfo member)
+        {
+            front = null;
+            squad = null;
+            member = default;
+            if (currentGameMode != ArenaGameMode.AllOutWar ||
+                memberHealth == null ||
+                !allOutWarSquadMembers.TryGetValue(memberHealth, out member) ||
+                !allOutWarFronts.TryGetValue(member.TeamId, out front))
+            {
+                return false;
+            }
+
+            squad = GetAllOutWarSquadState(front, member.SquadId);
+            RefreshAllOutWarSquadHealth(front, squad);
+            return true;
         }
 
         private void RegisterAllOutWarSquadMember(CombatantHealth health, int teamId, int squadId, int slotIndex)
@@ -924,6 +1348,80 @@ namespace ArenaShooter
             }
         }
 
+        private bool TryFindAllOutWarSquadmateNeedingMedPack(int teamId, int squadId, Vector3 position, out CombatantHealth wounded)
+        {
+            wounded = null;
+            var bestRatio = AllOutWarSquadWoundedHealthRatio;
+            var radiusSqr = AllOutWarSquadResourceShareRadius * AllOutWarSquadResourceShareRadius;
+            foreach (var pair in allOutWarSquadMembers)
+            {
+                var candidate = pair.Key;
+                var member = pair.Value;
+                if (candidate == null ||
+                    !candidate.IsAlive ||
+                    member.TeamId != teamId ||
+                    member.SquadId != squadId ||
+                    candidate.MaxHealth <= 0f)
+                {
+                    continue;
+                }
+
+                var delta = candidate.transform.position - position;
+                delta.y = 0f;
+                if (delta.sqrMagnitude > radiusSqr)
+                {
+                    continue;
+                }
+
+                var ratio = candidate.CurrentHealth / candidate.MaxHealth;
+                if (ratio < bestRatio)
+                {
+                    bestRatio = ratio;
+                    wounded = candidate;
+                }
+            }
+
+            return wounded != null;
+        }
+
+        private bool TryFindAllOutWarSquadmateNeedingAmmo(int teamId, int squadId, Vector3 position, out WeaponInventory inventory)
+        {
+            inventory = null;
+            var bestRatio = AllOutWarSquadLowAmmoRatio;
+            var radiusSqr = AllOutWarSquadResourceShareRadius * AllOutWarSquadResourceShareRadius;
+            foreach (var pair in allOutWarSquadMembers)
+            {
+                var candidate = pair.Key;
+                var member = pair.Value;
+                if (candidate == null ||
+                    !candidate.IsAlive ||
+                    member.TeamId != teamId ||
+                    member.SquadId != squadId ||
+                    !candidate.TryGetComponent<WeaponInventory>(out var candidateInventory) ||
+                    !candidateInventory.HasWeapon ||
+                    candidateInventory.MaxAmmo <= 0)
+                {
+                    continue;
+                }
+
+                var delta = candidate.transform.position - position;
+                delta.y = 0f;
+                if (delta.sqrMagnitude > radiusSqr)
+                {
+                    continue;
+                }
+
+                var ratio = (float)candidateInventory.Ammo / candidateInventory.MaxAmmo;
+                if (candidateInventory.Ammo <= 0 || ratio < bestRatio)
+                {
+                    bestRatio = ratio;
+                    inventory = candidateInventory;
+                }
+            }
+
+            return inventory != null;
+        }
+
         private void RefreshAllOutWarSquadHealth(AllOutWarArmyFrontState front, AllOutWarSquadFrontState squad)
         {
             if (front == null || squad == null)
@@ -931,7 +1429,12 @@ namespace ArenaShooter
                 return;
             }
 
-            var slotContributions = new float[AllOutWarSquadSize];
+            var healthContributions = new float[AllOutWarSquadSize];
+            var ammoContributions = new float[AllOutWarSquadSize];
+            squad.WoundedMembers = 0;
+            squad.CriticalWoundedMembers = 0;
+            squad.LowAmmoMembers = 0;
+            squad.EmptyAmmoMembers = 0;
             foreach (var pair in allOutWarSquadMembers)
             {
                 var soldier = pair.Key;
@@ -944,16 +1447,53 @@ namespace ArenaShooter
                 var slot = Mathf.Clamp(member.SlotIndex, 0, AllOutWarSquadSize - 1);
                 var healthContribution = soldier.MaxHealth > 0f ? soldier.CurrentHealth / soldier.MaxHealth : 0f;
                 var shieldContribution = soldier.MaxShield > 0f ? (soldier.CurrentShield / soldier.MaxShield) * 0.25f : 0f;
-                slotContributions[slot] = Mathf.Max(slotContributions[slot], Mathf.Clamp01(healthContribution + shieldContribution));
+                var normalizedHealth = Mathf.Clamp01(healthContribution + shieldContribution);
+                healthContributions[slot] = Mathf.Max(healthContributions[slot], normalizedHealth);
+                if (healthContribution < AllOutWarSquadWoundedHealthRatio)
+                {
+                    squad.WoundedMembers++;
+                }
+
+                if (healthContribution < AllOutWarSquadCriticalHealthRatio)
+                {
+                    squad.CriticalWoundedMembers++;
+                }
+
+                if (soldier.TryGetComponent<WeaponInventory>(out var inventory) && inventory.HasWeapon && inventory.MaxAmmo > 0)
+                {
+                    var normalizedAmmo = Mathf.Clamp01((float)inventory.Ammo / inventory.MaxAmmo);
+                    ammoContributions[slot] = Mathf.Max(ammoContributions[slot], normalizedAmmo);
+                    if (inventory.Ammo <= 0)
+                    {
+                        squad.EmptyAmmoMembers++;
+                    }
+                    else if (normalizedAmmo <= AllOutWarSquadLowAmmoRatio)
+                    {
+                        squad.LowAmmoMembers++;
+                    }
+                }
             }
 
-            var total = 0f;
-            for (var i = 0; i < slotContributions.Length; i++)
+            var healthTotal = 0f;
+            var ammoTotal = 0f;
+            for (var i = 0; i < healthContributions.Length; i++)
             {
-                total += slotContributions[i];
+                healthTotal += healthContributions[i];
+                ammoTotal += ammoContributions[i];
             }
 
-            squad.HealthRatio = Mathf.Clamp01(total / AllOutWarSquadSize);
+            squad.HealthRatio = Mathf.Clamp01(healthTotal / AllOutWarSquadSize);
+            squad.AmmoRatio = Mathf.Clamp01(ammoTotal / AllOutWarSquadSize);
+            if (squad.HealthRunner != null && (!squad.HealthRunner.IsAlive || !allOutWarSquadMembers.ContainsKey(squad.HealthRunner)))
+            {
+                squad.HealthRunner = null;
+            }
+
+            if (squad.AmmoRunner != null && (!squad.AmmoRunner.IsAlive || !allOutWarSquadMembers.ContainsKey(squad.AmmoRunner)))
+            {
+                squad.AmmoRunner = null;
+            }
+
             if (squad.HealthRatio <= 0.18f)
             {
                 squad.EngagementScale = AllOutWarEngagementScale.Overrun;
@@ -1000,6 +1540,412 @@ namespace ArenaShooter
             return AllOutWarEngagementScale.ProbeContact;
         }
 
+        private void EvaluateAllOutWarSquadDecision(AllOutWarArmyFrontState front, AllOutWarSquadFrontState squad, CombatantHealth reporter, Vector3 contextPosition)
+        {
+            if (front == null || squad == null)
+            {
+                return;
+            }
+
+            RefreshAllOutWarSquadHealth(front, squad);
+            var hasReporter = reporter != null && reporter.IsAlive;
+            var resourcePosition = contextPosition != Vector3.zero
+                ? contextPosition
+                    : hasReporter
+                        ? reporter.transform.position
+                        : squad.SignalPosition;
+            var hasCombatContact = IsAllOutWarCombatSignal(squad.Signal) || IsAllOutWarCombatDecision(squad.Decision);
+
+            if (squad.CriticalWoundedMembers > 0 || squad.HealthRatio <= 0.22f)
+            {
+                if (squad.CarriedMedPacks > 0 || (hasReporter && TryFindAllOutWarSafeHealingResource(reporter, out _)))
+                {
+                    squad.Decision = AllOutWarSquadDecision.Heal;
+                    squad.SignalPosition = resourcePosition;
+                    return;
+                }
+
+                squad.Decision = AllOutWarSquadDecision.Regroup;
+                squad.SignalPosition = resourcePosition;
+                return;
+            }
+
+            if (squad.HealthRunner != null && squad.WoundedMembers > 0)
+            {
+                squad.Decision = AllOutWarSquadDecision.Heal;
+                squad.SignalPosition = resourcePosition;
+                return;
+            }
+
+            if (squad.EmptyAmmoMembers > 0 || squad.AmmoRatio <= AllOutWarSquadLowAmmoRatio)
+            {
+                if (squad.CarriedAmmoCells > 0 || (hasReporter && TryFindNearestSafeAmmoPickup(
+                    reporter.transform.position,
+                    34f,
+                    reporter,
+                    8f,
+                    4.5f,
+                    out _)))
+                {
+                    squad.Decision = AllOutWarSquadDecision.Resupply;
+                    squad.SignalPosition = resourcePosition;
+                    return;
+                }
+
+                if (squad.EmptyAmmoMembers > 0)
+                {
+                    squad.Decision = AllOutWarSquadDecision.Regroup;
+                    squad.SignalPosition = resourcePosition;
+                    return;
+                }
+            }
+
+            if (!hasCombatContact && squad.WoundedMembers > 0 && squad.CarriedMedPacks > 0)
+            {
+                squad.Decision = AllOutWarSquadDecision.Heal;
+                squad.SignalPosition = resourcePosition;
+                return;
+            }
+
+            switch (squad.Signal)
+            {
+                case AllOutWarSquadSignal.EnemyKilled:
+                    squad.Decision = squad.HealthRatio >= 0.42f && squad.AmmoRatio >= 0.2f
+                        ? AllOutWarSquadDecision.Collapse
+                        : AllOutWarSquadDecision.Hold;
+                    return;
+                case AllOutWarSquadSignal.EnemySpotted:
+                    squad.Decision = squad.EngagementScale == AllOutWarEngagementScale.HeavyEngagement
+                        ? AllOutWarSquadDecision.Hold
+                        : AllOutWarSquadDecision.Probe;
+                    return;
+                case AllOutWarSquadSignal.ShotsExchanged:
+                case AllOutWarSquadSignal.TakingDamage:
+                    squad.Decision = squad.EngagementScale == AllOutWarEngagementScale.HeavyEngagement ||
+                                     squad.EngagementScale == AllOutWarEngagementScale.Overrun
+                        ? AllOutWarSquadDecision.Hold
+                        : AllOutWarSquadDecision.Fix;
+                    return;
+                case AllOutWarSquadSignal.AllyKilled:
+                    squad.Decision = squad.HealthRatio <= 0.45f ||
+                                     squad.EngagementScale == AllOutWarEngagementScale.HeavyEngagement ||
+                                     squad.EngagementScale == AllOutWarEngagementScale.Overrun
+                        ? AllOutWarSquadDecision.Regroup
+                        : AllOutWarSquadDecision.Fix;
+                    return;
+                case AllOutWarSquadSignal.ContactLost:
+                    squad.Decision = AllOutWarSquadDecision.ResumeSearch;
+                    return;
+                case AllOutWarSquadSignal.ResourceFound:
+                    if (squad.CarriedMedPacks > 0 && (squad.CriticalWoundedMembers > 0 || squad.HealthRatio <= 0.22f || (!hasCombatContact && squad.WoundedMembers > 0)))
+                    {
+                        squad.Decision = AllOutWarSquadDecision.Heal;
+                    }
+                    else if (squad.CarriedAmmoCells > 0 && (squad.EmptyAmmoMembers > 0 || squad.LowAmmoMembers > 0))
+                    {
+                        squad.Decision = AllOutWarSquadDecision.Resupply;
+                    }
+                    else
+                    {
+                        squad.Signal = AllOutWarSquadSignal.None;
+                        squad.EngagementScale = AllOutWarEngagementScale.None;
+                        ClearResolvedAllOutWarLogisticsDecision(squad);
+                        UpdateAllOutWarSquadMovementDecision(squad);
+                    }
+
+                    return;
+            }
+
+            ClearResolvedAllOutWarLogisticsDecision(squad);
+            UpdateAllOutWarSquadMovementDecision(squad);
+        }
+
+        private static bool HasUrgentAllOutWarLogisticsNeed(AllOutWarSquadFrontState squad)
+        {
+            if (squad == null)
+            {
+                return false;
+            }
+
+            return (squad.CarriedMedPacks > 0 && (squad.CriticalWoundedMembers > 0 || squad.HealthRatio <= 0.22f)) ||
+                (squad.CarriedAmmoCells > 0 && (squad.EmptyAmmoMembers > 0 || squad.AmmoRatio <= AllOutWarSquadLowAmmoRatio));
+        }
+
+        private static bool HasUsefulAllOutWarCarriedResourceNeed(AllOutWarSquadFrontState squad)
+        {
+            if (squad == null)
+            {
+                return false;
+            }
+
+            return (squad.CarriedMedPacks > 0 && squad.WoundedMembers > 0) ||
+                (squad.CarriedAmmoCells > 0 && (squad.LowAmmoMembers > 0 || squad.EmptyAmmoMembers > 0));
+        }
+
+        private static void ClearResolvedAllOutWarLogisticsDecision(AllOutWarSquadFrontState squad)
+        {
+            if (squad == null || squad.Signal != AllOutWarSquadSignal.None)
+            {
+                return;
+            }
+
+            if (squad.Decision == AllOutWarSquadDecision.Heal &&
+                squad.CriticalWoundedMembers <= 0 &&
+                squad.HealthRatio > 0.22f &&
+                squad.HealthRunner == null &&
+                !(squad.CarriedMedPacks > 0 && squad.WoundedMembers > 0))
+            {
+                squad.Decision = AllOutWarSquadDecision.Search;
+            }
+            else if (squad.Decision == AllOutWarSquadDecision.Resupply &&
+                     squad.EmptyAmmoMembers <= 0 &&
+                     squad.AmmoRunner == null &&
+                     squad.AmmoRatio > AllOutWarSquadLowAmmoRatio)
+            {
+                squad.Decision = AllOutWarSquadDecision.Search;
+            }
+            else if (squad.Decision == AllOutWarSquadDecision.Regroup &&
+                     squad.HealthRatio > 0.22f &&
+                     squad.EmptyAmmoMembers <= 0 &&
+                     squad.AmmoRatio > AllOutWarSquadLowAmmoRatio &&
+                     squad.HealthRunner == null &&
+                     squad.AmmoRunner == null &&
+                     !HasUsefulAllOutWarCarriedResourceNeed(squad))
+            {
+                squad.Decision = AllOutWarSquadDecision.Search;
+            }
+        }
+
+        private bool TryFindAllOutWarSafeHealingResource(CombatantHealth reporter, out Vector3 position)
+        {
+            position = Vector3.zero;
+            if (reporter == null)
+            {
+                return false;
+            }
+
+            if (TryFindNearestSafeHealthPickup(reporter.transform.position, 30f, reporter, 8f, 4.5f, out var pickup))
+            {
+                position = pickup.transform.position;
+                return true;
+            }
+
+            if (TryFindNearestSafeHealingStation(reporter.transform.position, reporter, 8f, 4.5f, out var station))
+            {
+                position = station.transform.position;
+                return true;
+            }
+
+            return false;
+        }
+
+        private void ReevaluateAllOutWarSupportSquads(AllOutWarArmyFrontState front, AllOutWarSquadFrontState sourceSquad, Vector3 position, AllOutWarSquadSignal signal)
+        {
+            if (front == null || sourceSquad == null || !IsAllOutWarCombatSignal(signal))
+            {
+                return;
+            }
+
+            var assignedFlanker = false;
+            var assignedLocalSupport = false;
+            var supportRadiusSqr = Mathf.Max(12f, roomSize * 3.1f);
+            supportRadiusSqr *= supportRadiusSqr;
+            foreach (var squad in front.Squads.Values)
+            {
+                assignedLocalSupport |= TryAssignAllOutWarSupportSquad(
+                    front,
+                    sourceSquad,
+                    squad,
+                    position,
+                    signal,
+                    supportRadiusSqr,
+                    false,
+                    ref assignedFlanker);
+            }
+
+            if (!assignedLocalSupport || (!assignedFlanker && sourceSquad.Decision == AllOutWarSquadDecision.Fix))
+            {
+                foreach (var squad in front.Squads.Values)
+                {
+                    if (TryAssignAllOutWarSupportSquad(
+                        front,
+                        sourceSquad,
+                        squad,
+                        position,
+                        signal,
+                        supportRadiusSqr,
+                        true,
+                        ref assignedFlanker))
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        private bool TryAssignAllOutWarSupportSquad(
+            AllOutWarArmyFrontState front,
+            AllOutWarSquadFrontState sourceSquad,
+            AllOutWarSquadFrontState squad,
+            Vector3 position,
+            AllOutWarSquadSignal signal,
+            float supportRadiusSqr,
+            bool reservePass,
+            ref bool assignedFlanker)
+        {
+            if (front == null || sourceSquad == null || squad == null || squad.SquadId == sourceSquad.SquadId)
+            {
+                return false;
+            }
+
+            var reserve = squad.Sector == AllOutWarSearchSector.Reserve;
+            if (reserve != reservePass)
+            {
+                return false;
+            }
+
+            RefreshAllOutWarSquadHealth(front, squad);
+            if (squad.Decision == AllOutWarSquadDecision.Heal ||
+                squad.Decision == AllOutWarSquadDecision.Resupply ||
+                squad.Decision == AllOutWarSquadDecision.Regroup)
+            {
+                EvaluateAllOutWarSquadDecision(front, squad, null, position);
+                return false;
+            }
+
+            if (squad.HealthRatio <= 0.25f || squad.AmmoRatio <= 0.12f)
+            {
+                EvaluateAllOutWarSquadDecision(front, squad, null, position);
+                return false;
+            }
+
+            if (!TryGetAllOutWarSquadCentroid(front.TeamId, squad.SquadId, out var squadPosition, out _))
+            {
+                return false;
+            }
+
+            var contactDistanceThreshold = Mathf.Max(6f, roomSize * 1.15f);
+            var contactDistanceThresholdSqr = contactDistanceThreshold * contactDistanceThreshold;
+            var hasSeparateCombatContact = IsAllOutWarCombatSignal(squad.Signal) || IsAllOutWarCombatDecision(squad.Decision);
+            if (hasSeparateCombatContact)
+            {
+                var contactDelta = squad.SignalPosition - position;
+                contactDelta.y = 0f;
+                if (squad.SignalPosition != Vector3.zero && contactDelta.sqrMagnitude > contactDistanceThresholdSqr)
+                {
+                    return false;
+                }
+            }
+
+            var delta = squadPosition - position;
+            delta.y = 0f;
+            if (!reservePass && delta.sqrMagnitude > supportRadiusSqr)
+            {
+                return false;
+            }
+
+            var previousDecision = squad.Decision;
+            var previousSupportPending = squad.SupportContactPending;
+            var previousSupportPosition = squad.SupportContactPosition;
+            squad.SignalPosition = position;
+            squad.SupportContactPending = true;
+            squad.SupportContactPosition = position;
+            if (!assignedFlanker && sourceSquad.Decision == AllOutWarSquadDecision.Fix)
+            {
+                squad.Decision = AllOutWarSquadDecision.Flank;
+                assignedFlanker = true;
+            }
+            else if (signal == AllOutWarSquadSignal.EnemyKilled && squad.HealthRatio >= 0.45f)
+            {
+                squad.Decision = AllOutWarSquadDecision.Collapse;
+            }
+            else
+            {
+                squad.Decision = AllOutWarSquadDecision.Hold;
+            }
+
+            if (ShouldRefreshAllOutWarSupportObjective(squad, previousDecision, previousSupportPending, previousSupportPosition))
+            {
+                IncrementAllOutWarSquadObjectiveVersion(squad);
+            }
+
+            return true;
+        }
+
+        private bool TryGetAllOutWarSquadCentroid(int teamId, int squadId, out Vector3 position, out int livingMembers)
+        {
+            position = Vector3.zero;
+            livingMembers = 0;
+            foreach (var pair in allOutWarSquadMembers)
+            {
+                var memberHealth = pair.Key;
+                var member = pair.Value;
+                if (member.TeamId != teamId ||
+                    member.SquadId != squadId ||
+                    memberHealth == null ||
+                    !memberHealth.IsAlive)
+                {
+                    continue;
+                }
+
+                position += memberHealth.transform.position;
+                livingMembers++;
+            }
+
+            if (livingMembers <= 0)
+            {
+                return false;
+            }
+
+            position /= livingMembers;
+            return true;
+        }
+
+        private bool ShouldRefreshAllOutWarSupportObjective(
+            AllOutWarSquadFrontState squad,
+            AllOutWarSquadDecision previousDecision,
+            bool previousSupportPending,
+            Vector3 previousSupportPosition)
+        {
+            if (squad == null || squad.Decision != previousDecision || !previousSupportPending)
+            {
+                return true;
+            }
+
+            var delta = squad.SupportContactPosition - previousSupportPosition;
+            delta.y = 0f;
+            var contactShift = Mathf.Max(4f, roomSize * 0.75f);
+            return delta.sqrMagnitude >= contactShift * contactShift;
+        }
+
+        private static void IncrementAllOutWarSquadObjectiveVersion(AllOutWarSquadFrontState squad)
+        {
+            if (squad == null)
+            {
+                return;
+            }
+
+            squad.ObjectiveVersion++;
+        }
+
+        private static bool IsAllOutWarCombatSignal(AllOutWarSquadSignal signal)
+        {
+            return signal == AllOutWarSquadSignal.EnemySpotted ||
+                   signal == AllOutWarSquadSignal.ShotsExchanged ||
+                   signal == AllOutWarSquadSignal.TakingDamage ||
+                   signal == AllOutWarSquadSignal.AllyKilled ||
+                   signal == AllOutWarSquadSignal.EnemyKilled;
+        }
+
+        private static bool IsAllOutWarCombatDecision(AllOutWarSquadDecision decision)
+        {
+            return decision == AllOutWarSquadDecision.Probe ||
+                   decision == AllOutWarSquadDecision.Fix ||
+                   decision == AllOutWarSquadDecision.Flank ||
+                   decision == AllOutWarSquadDecision.Collapse ||
+                   decision == AllOutWarSquadDecision.Hold;
+        }
+
         private int CountAllOutWarAlliedSquadSignalsNear(AllOutWarArmyFrontState front, int ignoredSquadId, Vector3 position, float radius)
         {
             if (front == null)
@@ -1011,7 +1957,7 @@ namespace ArenaShooter
             var count = 0;
             foreach (var squad in front.Squads.Values)
             {
-                if (squad.SquadId == ignoredSquadId || squad.Signal == AllOutWarSquadSignal.None)
+                if (squad.SquadId == ignoredSquadId || !IsAllOutWarCombatSignal(squad.Signal))
                 {
                     continue;
                 }
@@ -1027,29 +1973,26 @@ namespace ArenaShooter
             return count;
         }
 
-        private static AllOutWarSquadDecision DeriveAllOutWarSquadDecision(AllOutWarSquadFrontState squad, AllOutWarSquadSignal signal)
-        {
-            if (squad.HealthRatio <= 0.18f)
-            {
-                return squad.Decision == AllOutWarSquadDecision.Heal ? AllOutWarSquadDecision.Heal : AllOutWarSquadDecision.Regroup;
-            }
-
-            return signal switch
-            {
-                AllOutWarSquadSignal.EnemySpotted => AllOutWarSquadDecision.Probe,
-                AllOutWarSquadSignal.ShotsExchanged => AllOutWarSquadDecision.Fix,
-                AllOutWarSquadSignal.TakingDamage => AllOutWarSquadDecision.Fix,
-                AllOutWarSquadSignal.AllyKilled => squad.HealthRatio <= 0.45f ? AllOutWarSquadDecision.Regroup : AllOutWarSquadDecision.Fix,
-                AllOutWarSquadSignal.EnemyKilled => AllOutWarSquadDecision.Collapse,
-                AllOutWarSquadSignal.ContactLost => AllOutWarSquadDecision.ResumeSearch,
-                AllOutWarSquadSignal.ResourceFound => squad.Decision,
-                _ => AllOutWarSquadDecision.Search
-            };
-        }
-
         private static void UpdateAllOutWarSquadMovementDecision(AllOutWarSquadFrontState squad)
         {
             if (squad == null || squad.Signal != AllOutWarSquadSignal.None)
+            {
+                return;
+            }
+
+            if (squad.Decision == AllOutWarSquadDecision.Collapse &&
+                !squad.SupportContactPending &&
+                squad.Phase != AllOutWarSearchPhase.Collapse)
+            {
+                squad.Decision = AllOutWarSquadDecision.Search;
+            }
+
+            if (squad.Decision == AllOutWarSquadDecision.Heal ||
+                squad.Decision == AllOutWarSquadDecision.Resupply ||
+                squad.Decision == AllOutWarSquadDecision.Regroup ||
+                squad.Decision == AllOutWarSquadDecision.Flank ||
+                squad.Decision == AllOutWarSquadDecision.Collapse ||
+                squad.Decision == AllOutWarSquadDecision.Hold)
             {
                 return;
             }
@@ -1139,6 +2082,7 @@ namespace ArenaShooter
                 var travelPenalty = Vector3.Distance(currentPosition, center) * 0.06f;
                 var recentOwnPenalty = room == squad.LastSearchedRoom ? 12f : 0f;
                 var score = sectorScore + distanceScore + searchedScore + enemyPressureScore - claimedPenalty - claimedNearbyPenalty - travelPenalty - recentOwnPenalty;
+                score += GetAllOutWarDecisionObjectiveScore(front, squad, currentPosition, center, home, searchVector, tangent, spacing, enemyPressure);
 
                 if (squad.Phase == AllOutWarSearchPhase.Sweep)
                 {
@@ -1184,6 +2128,96 @@ namespace ArenaShooter
             squad.ObjectiveRoom = bestRoom;
             squad.HasObjective = true;
             squad.AssignedAt = Time.time;
+            squad.ObjectiveAssignedVersion = squad.ObjectiveVersion;
+        }
+
+        private static float GetAllOutWarDecisionObjectiveScore(
+            AllOutWarArmyFrontState front,
+            AllOutWarSquadFrontState squad,
+            Vector3 currentPosition,
+            Vector3 roomCenter,
+            Vector3 home,
+            Vector3 searchVector,
+            Vector3 tangent,
+            float spacing,
+            int enemyPressure)
+        {
+            if (front == null || squad == null)
+            {
+                return 0f;
+            }
+
+            var signal = squad.SignalPosition;
+            var hasSignal = signal != Vector3.zero;
+            var desired = roomCenter;
+            var weight = 0f;
+            switch (squad.Decision)
+            {
+                case AllOutWarSquadDecision.Probe:
+                    if (!hasSignal)
+                    {
+                        return 0f;
+                    }
+
+                    desired = signal - searchVector * spacing * 0.45f;
+                    weight = 1.25f;
+                    break;
+                case AllOutWarSquadDecision.Fix:
+                    if (!hasSignal)
+                    {
+                        return enemyPressure * 10f;
+                    }
+
+                    desired = signal - searchVector * spacing * 0.75f;
+                    weight = 1.5f;
+                    break;
+                case AllOutWarSquadDecision.Flank:
+                    if (!hasSignal)
+                    {
+                        return 0f;
+                    }
+
+                    var flankSide = squad.Sector == AllOutWarSearchSector.Left || squad.Sector == AllOutWarSearchSector.WideLeft
+                        ? -1f
+                        : squad.Sector == AllOutWarSearchSector.Right || squad.Sector == AllOutWarSearchSector.WideRight
+                            ? 1f
+                            : squad.SquadId % 2 == 0 ? 1f : -1f;
+                    desired = signal + tangent * flankSide * spacing * 1.7f - searchVector * spacing * 0.25f;
+                    weight = 1.7f;
+                    break;
+                case AllOutWarSquadDecision.Collapse:
+                    if (!hasSignal)
+                    {
+                        return enemyPressure * 16f;
+                    }
+
+                    desired = signal;
+                    weight = 1.8f;
+                    break;
+                case AllOutWarSquadDecision.Hold:
+                    desired = currentPosition;
+                    weight = 1.1f;
+                    break;
+                case AllOutWarSquadDecision.Regroup:
+                case AllOutWarSquadDecision.Heal:
+                case AllOutWarSquadDecision.Resupply:
+                    desired = home + front.PushDirection.normalized * spacing * 0.9f;
+                    weight = 1.35f;
+                    break;
+                case AllOutWarSquadDecision.ResumeSearch:
+                    if (hasSignal)
+                    {
+                        desired = signal;
+                        weight = 0.85f;
+                    }
+                    break;
+                default:
+                    return 0f;
+            }
+
+            var delta = roomCenter - desired;
+            delta.y = 0f;
+            return Mathf.Max(0f, spacing * 3.5f - delta.magnitude) * weight;
         }
 
         private static float GetAllOutWarRoomPushScore(AllOutWarArmyFrontState front, Vector3 roomCenter)

@@ -10,6 +10,7 @@ namespace ArenaShooter
         private Transform floatingModel;
         private Vector3 floatingBaseLocalPosition;
         private float bobPhase;
+        public float HealAmount => healAmount;
 
         public void Configure(MatchController owner, float amount)
         {
@@ -37,7 +38,18 @@ namespace ArenaShooter
         private void OnTriggerEnter(Collider other)
         {
             var health = other.GetComponentInParent<CombatantHealth>();
-            if (health == null || !health.Heal(healAmount))
+            if (health == null)
+            {
+                return;
+            }
+
+            if (match != null && match.TryCollectAllOutWarSquadHealthPickup(health, this))
+            {
+                Destroy(gameObject);
+                return;
+            }
+
+            if (!health.Heal(healAmount))
             {
                 return;
             }

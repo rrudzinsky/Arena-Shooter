@@ -10,6 +10,7 @@ namespace ArenaShooter
         private Transform floatingModel;
         private Vector3 floatingBaseLocalPosition;
         private float bobPhase;
+        public int AmmoAmount => ammoAmount;
 
         public void Configure(int amount)
         {
@@ -42,6 +43,13 @@ namespace ArenaShooter
         private void OnTriggerEnter(Collider other)
         {
             var inventory = other.GetComponentInParent<WeaponInventory>();
+            var health = other.GetComponentInParent<CombatantHealth>();
+            if (match != null && match.TryCollectAllOutWarSquadAmmoPickup(health, this))
+            {
+                Destroy(gameObject);
+                return;
+            }
+
             if (inventory == null || !inventory.TryAddAmmo(ammoAmount))
             {
                 return;

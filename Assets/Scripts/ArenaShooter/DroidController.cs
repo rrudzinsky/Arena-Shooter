@@ -91,6 +91,7 @@ namespace ArenaShooter
         private int allOutWarRoleIndex;
         private int allOutWarSquadId;
         private int allOutWarSlotIndex;
+        private int allOutWarObjectiveVersion = -1;
         private bool autonomousWarMode;
         private bool allOutWarForceObjectiveRefresh;
         private bool hasLastPosition;
@@ -162,6 +163,7 @@ namespace ArenaShooter
             allOutWarRoleIndex = allOutWarObjectiveSeed % 5;
             allOutWarSquadId = Mathf.Max(0, squadId);
             allOutWarSlotIndex = Mathf.Max(0, slotIndex);
+            allOutWarObjectiveVersion = -1;
             squadRole = (SquadRole)(allOutWarObjectiveSeed % 3);
             preferredRange += allOutWarRoleIndex == 2 ? 2.2f : allOutWarRoleIndex == 3 ? -1.4f : 0f;
             runSpeed += allOutWarRoleIndex == 0 || allOutWarRoleIndex == 2 ? 0.35f : 0f;
@@ -184,6 +186,11 @@ namespace ArenaShooter
             if (match == null || layout == null || (!autonomousWarMode && playerAnchor == null) || health == null || !health.IsAlive || !match.IsMatchActive)
             {
                 return;
+            }
+
+            if (autonomousWarMode)
+            {
+                match.TryDistributeAllOutWarSquadResources(health, transform.position);
             }
 
             var eye = transform.position + Vector3.up * 0.68f;
@@ -429,15 +436,25 @@ namespace ArenaShooter
 
             if (autonomousWarMode)
             {
-                if (Time.time < nextSearchPickAt && (searchDestination - transform.position).sqrMagnitude > 2.2f)
+                var squadObjectiveVersion = match != null ? match.GetAllOutWarSquadObjectiveVersion(health) : -1;
+                var squadObjectiveNeedsRefresh = squadObjectiveVersion >= 0 && squadObjectiveVersion != allOutWarObjectiveVersion;
+                if (!squadObjectiveNeedsRefresh &&
+                    Time.time < nextSearchPickAt &&
+                    (searchDestination - transform.position).sqrMagnitude > 2.2f)
                 {
                     return searchDestination;
                 }
 
-                var forceNew = allOutWarForceObjectiveRefresh || (searchDestination - transform.position).sqrMagnitude <= 2.2f;
+                var forceNew = allOutWarForceObjectiveRefresh ||
+                    (searchDestination - transform.position).sqrMagnitude <= 2.2f;
                 allOutWarForceObjectiveRefresh = false;
                 nextSearchPickAt = Time.time + Random.Range(8f, 14f);
                 searchDestination = ChooseAllOutWarSearchDestination(forceNew);
+                if (squadObjectiveVersion >= 0)
+                {
+                    allOutWarObjectiveVersion = squadObjectiveVersion;
+                }
+
                 return searchDestination;
             }
 
@@ -644,6 +661,12 @@ namespace ArenaShooter
             var healthRatio = health.CurrentHealth / health.MaxHealth;
             if (healthRatio > 0.38f)
             {
+                if (autonomousWarMode && survivalState == TacticalSurvivalState.RetreatForHeal)
+                {
+                    ClearHealingTargets();
+                    match?.ReevaluateAllOutWarSquadDecision(health, transform.position);
+                }
+
                 survivalState = TacticalSurvivalState.None;
                 nextSurvivalAssessmentAt = 0f;
                 return false;
@@ -735,11 +758,16 @@ namespace ArenaShooter
                 return TryUpdateHealingObjective(canSeePlayer, targetEye);
             }
 
+            if (match.IsAllOutWarSquadCarryingMedPacks(health))
+            {
+                match.ReevaluateAllOutWarSquadDecision(health, transform.position);
+                return ResumeAllOutWarFrontOrCombat(false);
+            }
+
             if (TryBeginAllOutWarSafeHealingRetreat())
             {
                 survivalState = TacticalSurvivalState.RetreatForHeal;
                 nextSurvivalAssessmentAt = Time.time + Random.Range(1.6f, 2.4f);
-                match.ReportAllOutWarSquadDecision(health, MatchController.AllOutWarSquadDecision.Heal, healingDestination);
                 return TryUpdateHealingObjective(canSeePlayer, targetEye);
             }
 
@@ -758,7 +786,7 @@ namespace ArenaShooter
                 if (survivalState == TacticalSurvivalState.Resupply)
                 {
                     survivalState = TacticalSurvivalState.None;
-                    match.ReportAllOutWarSquadDecision(health, MatchController.AllOutWarSquadDecision.Search, transform.position);
+                    match.ReevaluateAllOutWarSquadDecision(health, transform.position);
                 }
 
                 ClearAmmoTarget();
@@ -769,6 +797,18 @@ namespace ArenaShooter
             if (canSeeTarget && !empty)
             {
                 return false;
+            }
+
+            if (match.TryDistributeAllOutWarSquadResources(health, transform.position))
+            {
+                return false;
+            }
+
+            if (match.IsAllOutWarSquadCarryingAmmoCells(health))
+            {
+                match.ReevaluateAllOutWarSquadDecision(health, transform.position);
+                MoveAllOutWarFrontSearch();
+                return true;
             }
 
             if (!empty && health != null && health.MaxHealth > 0f && health.CurrentHealth / health.MaxHealth <= 0.38f)
@@ -856,7 +896,7 @@ namespace ArenaShooter
                 if (FlatDistance(transform.position, healingStationTarget.transform.position) <= 1.85f &&
                     (healingStationTarget.TryHealToFull(health) || health.CurrentHealth >= health.MaxHealth - 0.5f))
                 {
-                    healingStationTarget = null;
+                    ClearHealingTargets();
                     survivalState = TacticalSurvivalState.None;
                     ApplyGravityOnly();
                     return true;
@@ -1011,13 +1051,17 @@ namespace ArenaShooter
                 AllOutWarHealRouteDangerRadius,
                 out var pickup))
             {
+                if (!match.TryClaimAllOutWarHealthRunner(health))
+                {
+                    return false;
+                }
+
                 healthPickupTarget = pickup;
                 healingStationTarget = null;
                 healingDestination = pickup.transform.position + Vector3.up * 1.1f;
                 ClearCurrentPath();
                 repathAt = 0f;
-                match.ReportAllOutWarSquadSignal(health, MatchController.AllOutWarSquadSignal.ResourceFound, pickup.transform.position, null);
-                match.ReportAllOutWarSquadDecision(health, MatchController.AllOutWarSquadDecision.Heal, pickup.transform.position);
+                match.ReportAllOutWarSquadLogisticsObjective(health, pickup.transform.position, true);
                 return true;
             }
 
@@ -1028,13 +1072,17 @@ namespace ArenaShooter
                 AllOutWarHealRouteDangerRadius,
                 out var station))
             {
+                if (!match.TryClaimAllOutWarHealthRunner(health))
+                {
+                    return false;
+                }
+
                 healingStationTarget = station;
                 healthPickupTarget = null;
                 healingDestination = station.transform.position + Vector3.up * 1.1f;
                 ClearCurrentPath();
                 repathAt = 0f;
-                match.ReportAllOutWarSquadSignal(health, MatchController.AllOutWarSquadSignal.ResourceFound, station.transform.position, null);
-                match.ReportAllOutWarSquadDecision(health, MatchController.AllOutWarSquadDecision.Heal, station.transform.position);
+                match.ReportAllOutWarSquadLogisticsObjective(health, station.transform.position, true);
                 return true;
             }
 
@@ -1085,11 +1133,15 @@ namespace ArenaShooter
                 return false;
             }
 
+            if (!match.TryClaimAllOutWarAmmoRunner(health))
+            {
+                return false;
+            }
+
             ammoPickupTarget = pickup;
             ClearCurrentPath();
             repathAt = 0f;
-            match.ReportAllOutWarSquadSignal(health, MatchController.AllOutWarSquadSignal.ResourceFound, pickup.transform.position, null);
-            match.ReportAllOutWarSquadDecision(health, MatchController.AllOutWarSquadDecision.Resupply, pickup.transform.position);
+            match.ReportAllOutWarSquadLogisticsObjective(health, pickup.transform.position, false);
             return true;
         }
 
@@ -1106,11 +1158,21 @@ namespace ArenaShooter
 
         private void ClearAmmoTarget()
         {
+            if (autonomousWarMode && match != null)
+            {
+                match.ReleaseAllOutWarAmmoRunner(health);
+            }
+
             ammoPickupTarget = null;
         }
 
         private void ClearHealingTargets()
         {
+            if (autonomousWarMode && match != null)
+            {
+                match.ReleaseAllOutWarHealthRunner(health);
+            }
+
             healingStationTarget = null;
             healthPickupTarget = null;
             healingDestination = Vector3.zero;
