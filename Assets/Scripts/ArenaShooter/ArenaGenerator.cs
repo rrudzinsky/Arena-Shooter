@@ -6,6 +6,9 @@ namespace ArenaShooter
     public sealed class ArenaGenerator : MonoBehaviour
     {
         private ArenaTheme activeTheme;
+        private ArenaTheme wallBaseAccentTheme;
+        private Material wallBaseAccentMaterial;
+        private bool generatingAllOutWar;
 
         private static readonly Vector2Int[] Directions =
         {
@@ -18,6 +21,7 @@ namespace ArenaShooter
         public ArenaLayout Generate(ArenaTheme theme, Transform root, int seed, int targetRooms, int gridRadius, float roomSize, float corridorLength, float corridorWidth, float wallHeight, int pickupCount, int gateCount)
         {
             activeTheme = theme;
+            generatingAllOutWar = false;
             var random = new System.Random(seed);
             var layout = BuildRoomGraph(random, targetRooms, gridRadius, roomSize + corridorLength);
             AddGateSpawns(layout, random, gateCount, roomSize, corridorLength);
@@ -51,6 +55,7 @@ namespace ArenaShooter
         public ArenaLayout GenerateAllOutWar(ArenaTheme theme, Transform root, int seed, int totalArmies, int targetRooms, int gridRadius, float roomSize, float corridorLength, float corridorWidth, float wallHeight, int pickupCount)
         {
             activeTheme = theme;
+            generatingAllOutWar = true;
             var random = new System.Random(seed);
             var spacing = roomSize + corridorLength;
             var layout = BuildCircularRoomGraph(random, Mathf.Max(3, totalArmies), targetRooms, gridRadius, spacing);
@@ -72,8 +77,9 @@ namespace ArenaShooter
                 }
             }
 
-            CreateAllOutWarSafetyFloor(theme, root, layout.CircularCenter, layout.DomeRadius);
+            CreateAllOutWarDomeFloor(theme, root, layout.CircularCenter, layout.DomeRadius);
             CreateInvisibleCircularBoundary(root, layout.CircularCenter, layout.DomeRadius, wallHeight);
+            generatingAllOutWar = false;
             return layout;
         }
 
@@ -362,13 +368,14 @@ namespace ArenaShooter
                 var angle = Mathf.PI * 2f * i / segmentCount;
                 var outward = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
                 var tangentAngle = -angle * Mathf.Rad2Deg;
-                var wall = CreateRawCube(
+                var rotation = Quaternion.Euler(0f, tangentAngle, 0f);
+                CreateRawCube(
                     "Arena Wall",
                     root,
                     center + outward * radius + Vector3.up * (wallHeight * 0.5f),
                     new Vector3(arcLength * 1.08f, wallHeight, 0.65f),
-                    theme.Wall);
-                wall.transform.rotation = Quaternion.Euler(0f, tangentAngle, 0f);
+                    theme.Wall,
+                    rotation: rotation);
             }
         }
 
@@ -391,12 +398,12 @@ namespace ArenaShooter
             }
         }
 
-        private void CreateAllOutWarSafetyFloor(ArenaTheme theme, Transform root, Vector3 center, float radius)
+        private void CreateAllOutWarDomeFloor(ArenaTheme theme, Transform root, Vector3 center, float radius)
         {
-            var floor = new GameObject("All Out War Dome Floor Safety Disk");
+            var floor = new GameObject("All Out War Continuous Dome Floor");
             floor.transform.SetParent(root, false);
 
-            var mesh = CreateDiskMesh("All Out War Dome Floor Safety Mesh", center + Vector3.down * 0.155f, radius);
+            var mesh = CreateDiskMesh("All Out War Continuous Dome Floor Mesh", center + Vector3.down * 0.003f, radius);
             var meshFilter = floor.AddComponent<MeshFilter>();
             meshFilter.sharedMesh = mesh;
 
@@ -405,7 +412,7 @@ namespace ArenaShooter
             DroidRenderSetup.ApplyRenderer(renderer, StylizedOutlineCategory.None);
 
             var collider = floor.AddComponent<MeshCollider>();
-            collider.sharedMesh = mesh;
+            collider.sharedMesh = CreateDiskMesh("All Out War Continuous Dome Floor Collider Mesh", center, radius);
         }
 
         private static Mesh CreateDiskMesh(string meshName, Vector3 center, float radius)
@@ -479,6 +486,12 @@ namespace ArenaShooter
 
         private void CreateRoomFloor(ArenaTheme theme, Transform root, Vector3 position, Vector3 scale, bool forcePrimitive = false)
         {
+            if (generatingAllOutWar)
+            {
+                CreateVisualRoomFloor(theme, root, position, scale, forcePrimitive);
+                return;
+            }
+
             if (!forcePrimitive && ArenaRoomFloorAsset.TryBuild(root, theme, position, scale, out var floor))
             {
                 floor.name = "Room Floor";
@@ -487,6 +500,18 @@ namespace ArenaShooter
             }
 
             CreateCube("Room Floor", root, position, scale, theme.Floor);
+        }
+
+        private void CreateVisualRoomFloor(ArenaTheme theme, Transform root, Vector3 position, Vector3 scale, bool forcePrimitive)
+        {
+            if (!forcePrimitive && ArenaRoomFloorAsset.TryBuild(root, theme, position, scale, out var floor))
+            {
+                floor.name = "Room Floor";
+                RemoveCollidersInChildren(floor);
+                return;
+            }
+
+            CreateVisualCube("Room Floor", root, position, scale, theme.Floor);
         }
 
         private void CreateRoomWalls(ArenaTheme theme, Transform root, ArenaLayout layout, Vector2Int room, Vector3 center, float roomSize, float doorwayWidth, float wallHeight)
@@ -727,7 +752,7 @@ namespace ArenaShooter
                     ? new Vector3(roomSize, 0.2f, corridorLength + 0.4f)
                     : new Vector3(corridorWidth, 0.2f, corridorLength + 0.4f);
                 var floorPosition = center + new Vector3(0f, -0.1f, 0f);
-                CreateCube("Corridor Floor", root, floorPosition, floorScale, theme.Floor);
+                CreateFloorCube(theme, root, "Corridor Floor", floorPosition, floorScale);
                 if (openFloorLink)
                 {
                     return;
@@ -745,7 +770,7 @@ namespace ArenaShooter
                     ? new Vector3(corridorLength + 0.4f, 0.2f, roomSize)
                     : new Vector3(corridorLength + 0.4f, 0.2f, corridorWidth);
                 var floorPosition = center + new Vector3(0f, -0.1f, 0f);
-                CreateCube("Corridor Floor", root, floorPosition, floorScale, theme.Floor);
+                CreateFloorCube(theme, root, "Corridor Floor", floorPosition, floorScale);
                 if (openFloorLink)
                 {
                     return;
@@ -1179,6 +1204,7 @@ namespace ArenaShooter
             {
                 wallBlock.name = name;
                 AddDestructibleIfNeeded(wallBlock, name, scale, material);
+                CreateWallBaseAccentIfNeeded(name, root, position, scale, Quaternion.identity);
                 return wallBlock;
             }
 
@@ -1195,15 +1221,43 @@ namespace ArenaShooter
             }
 
             AddDestructibleIfNeeded(cube, name, scale, material);
+            CreateWallBaseAccentIfNeeded(name, root, position, scale, Quaternion.identity);
             return cube;
         }
 
-        private GameObject CreateRawCube(string name, Transform root, Vector3 position, Vector3 scale, Material material, DestructibleDamageProfile damageProfile = DestructibleDamageProfile.Wall, Vector3 biteDirection = default)
+        private GameObject CreateFloorCube(ArenaTheme theme, Transform root, string name, Vector3 position, Vector3 scale)
+        {
+            return generatingAllOutWar
+                ? CreateVisualCube(name, root, position, scale, theme.Floor)
+                : CreateCube(name, root, position, scale, theme.Floor);
+        }
+
+        private GameObject CreateVisualCube(string name, Transform root, Vector3 position, Vector3 scale, Material material)
         {
             var cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
             cube.name = name;
             cube.transform.SetParent(root, false);
             cube.transform.position = position;
+            cube.transform.localScale = scale;
+
+            RemoveCollider(cube);
+            if (cube.TryGetComponent<Renderer>(out var renderer))
+            {
+                renderer.sharedMaterial = material;
+                DroidRenderSetup.ApplyRenderer(renderer, ResolveOutlineCategory(name, material));
+            }
+
+            return cube;
+        }
+
+        private GameObject CreateRawCube(string name, Transform root, Vector3 position, Vector3 scale, Material material, DestructibleDamageProfile damageProfile = DestructibleDamageProfile.Wall, Vector3 biteDirection = default, Quaternion? rotation = null)
+        {
+            var cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            cube.name = name;
+            cube.transform.SetParent(root, false);
+            cube.transform.position = position;
+            var resolvedRotation = rotation ?? Quaternion.identity;
+            cube.transform.rotation = resolvedRotation;
             cube.transform.localScale = scale;
 
             if (cube.TryGetComponent<Renderer>(out var renderer))
@@ -1213,12 +1267,195 @@ namespace ArenaShooter
             }
 
             AddDestructibleIfNeeded(cube, name, scale, material, damageProfile, biteDirection);
+            CreateWallBaseAccentIfNeeded(name, root, position, scale, resolvedRotation);
             return cube;
+        }
+
+        private void CreateWallBaseAccentIfNeeded(string sourceName, Transform root, Vector3 position, Vector3 scale, Quaternion rotation)
+        {
+            if (GetWallBaseAccentMaterial() == null || !ShouldCreateWallBaseAccent(sourceName))
+            {
+                return;
+            }
+
+            const float accentThickness = 0.06f;
+            const float accentOffset = 0.024f;
+            const float accentLengthPadding = 0.08f;
+            const float floorLift = 0.001f;
+            var baseY = position.y - scale.y * 0.5f + floorLift;
+            var basePosition = new Vector3(position.x, baseY, position.z);
+            var isPillar = sourceName == "Room Corridor Opening Pillar";
+            var horizontalMajor = scale.x >= scale.z;
+
+            if (isPillar)
+            {
+                var xLength = Mathf.Max(accentThickness, scale.x + accentLengthPadding);
+                var zLength = Mathf.Max(accentThickness, scale.z + accentLengthPadding);
+                var zOffset = scale.z * 0.5f + accentOffset;
+                var xOffset = scale.x * 0.5f + accentOffset;
+                CreateNonCollidingFloorAccentRail("Pillar Base Neon Accent", root, basePosition + rotation * new Vector3(0f, 0f, zOffset), new Vector2(xLength, accentThickness), rotation);
+                CreateNonCollidingFloorAccentRail("Pillar Base Neon Accent", root, basePosition + rotation * new Vector3(0f, 0f, -zOffset), new Vector2(xLength, accentThickness), rotation);
+                CreateNonCollidingFloorAccentRail("Pillar Base Neon Accent", root, basePosition + rotation * new Vector3(xOffset, 0f, 0f), new Vector2(accentThickness, zLength), rotation);
+                CreateNonCollidingFloorAccentRail("Pillar Base Neon Accent", root, basePosition + rotation * new Vector3(-xOffset, 0f, 0f), new Vector2(accentThickness, zLength), rotation);
+                return;
+            }
+
+            if (horizontalMajor)
+            {
+                var length = Mathf.Max(accentThickness, scale.x + accentLengthPadding);
+                var zOffset = scale.z * 0.5f + accentOffset;
+                var xOffset = scale.x * 0.5f + accentOffset;
+                var capLength = Mathf.Max(accentThickness, scale.z + accentOffset * 2f + accentThickness);
+                CreateNonCollidingFloorAccentRail("Wall Base Neon Accent", root, basePosition + rotation * new Vector3(0f, 0f, zOffset), new Vector2(length, accentThickness), rotation);
+                CreateNonCollidingFloorAccentRail("Wall Base Neon Accent", root, basePosition + rotation * new Vector3(0f, 0f, -zOffset), new Vector2(length, accentThickness), rotation);
+                CreateNonCollidingFloorAccentRail("Wall Base Neon Accent", root, basePosition + rotation * new Vector3(xOffset, 0f, 0f), new Vector2(accentThickness, capLength), rotation);
+                CreateNonCollidingFloorAccentRail("Wall Base Neon Accent", root, basePosition + rotation * new Vector3(-xOffset, 0f, 0f), new Vector2(accentThickness, capLength), rotation);
+                return;
+            }
+
+            var zLengthWall = Mathf.Max(accentThickness, scale.z + accentLengthPadding);
+            var xFaceOffset = scale.x * 0.5f + accentOffset;
+            var zFaceOffset = scale.z * 0.5f + accentOffset;
+            var sideCapLength = Mathf.Max(accentThickness, scale.x + accentOffset * 2f + accentThickness);
+            CreateNonCollidingFloorAccentRail("Wall Base Neon Accent", root, basePosition + rotation * new Vector3(xFaceOffset, 0f, 0f), new Vector2(accentThickness, zLengthWall), rotation);
+            CreateNonCollidingFloorAccentRail("Wall Base Neon Accent", root, basePosition + rotation * new Vector3(-xFaceOffset, 0f, 0f), new Vector2(accentThickness, zLengthWall), rotation);
+            CreateNonCollidingFloorAccentRail("Wall Base Neon Accent", root, basePosition + rotation * new Vector3(0f, 0f, zFaceOffset), new Vector2(sideCapLength, accentThickness), rotation);
+            CreateNonCollidingFloorAccentRail("Wall Base Neon Accent", root, basePosition + rotation * new Vector3(0f, 0f, -zFaceOffset), new Vector2(sideCapLength, accentThickness), rotation);
+        }
+
+        private GameObject CreateNonCollidingFloorAccentRail(string name, Transform root, Vector3 position, Vector2 size, Quaternion rotation)
+        {
+            var rail = new GameObject(name);
+            rail.transform.SetParent(root, false);
+            rail.transform.position = position;
+            rail.transform.rotation = rotation;
+
+            var mesh = CreateRoundedFloorAccentRailMesh(name + " Mesh", size);
+            var meshFilter = rail.AddComponent<MeshFilter>();
+            meshFilter.sharedMesh = mesh;
+            var renderer = rail.AddComponent<MeshRenderer>();
+            renderer.sharedMaterial = GetWallBaseAccentMaterial();
+            DroidRenderSetup.ApplyRenderer(renderer, StylizedOutlineCategory.None);
+            return rail;
+        }
+
+        private static Mesh CreateRoundedFloorAccentRailMesh(string name, Vector2 size)
+        {
+            const int crossSegments = 8;
+            var runsAlongX = size.x >= size.y;
+            var length = Mathf.Max(0.001f, runsAlongX ? size.x : size.y);
+            var width = Mathf.Max(0.001f, runsAlongX ? size.y : size.x);
+            var halfLength = length * 0.5f;
+            var halfWidth = width * 0.5f;
+            var height = Mathf.Clamp(width * 0.82f, 0.024f, 0.06f);
+            var vertices = new List<Vector3>((crossSegments + 1) * 2);
+            var triangles = new List<int>(crossSegments * 12 + crossSegments * 12);
+
+            for (var end = 0; end < 2; end++)
+            {
+                var axial = end == 0 ? -halfLength : halfLength;
+                for (var i = 0; i <= crossSegments; i++)
+                {
+                    var angle = i / (float)crossSegments * Mathf.PI;
+                    var across = Mathf.Cos(angle) * halfWidth;
+                    var y = Mathf.Sin(angle) * height;
+                    vertices.Add(runsAlongX
+                        ? new Vector3(axial, y, across)
+                        : new Vector3(across, y, axial));
+                }
+            }
+
+            var row = crossSegments + 1;
+            for (var i = 0; i < crossSegments; i++)
+            {
+                var a = i;
+                var b = i + 1;
+                var c = row + i + 1;
+                var d = row + i;
+                AddDoubleSidedTriangle(triangles, a, b, c);
+                AddDoubleSidedTriangle(triangles, a, c, d);
+            }
+
+            for (var i = 1; i < crossSegments; i++)
+            {
+                AddDoubleSidedTriangle(triangles, 0, i, i + 1);
+                AddDoubleSidedTriangle(triangles, row, row + i + 1, row + i);
+            }
+
+            var mesh = new Mesh { name = name };
+            mesh.SetVertices(vertices);
+            mesh.SetTriangles(triangles, 0);
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        private static void AddDoubleSidedTriangle(List<int> triangles, int a, int b, int c)
+        {
+            triangles.Add(a);
+            triangles.Add(b);
+            triangles.Add(c);
+            triangles.Add(a);
+            triangles.Add(c);
+            triangles.Add(b);
+        }
+
+        private Material GetWallBaseAccentMaterial()
+        {
+            if (activeTheme == null || activeTheme.NeonA == null)
+            {
+                return null;
+            }
+
+            if (wallBaseAccentMaterial != null && wallBaseAccentTheme == activeTheme)
+            {
+                return wallBaseAccentMaterial;
+            }
+
+            wallBaseAccentTheme = activeTheme;
+            wallBaseAccentMaterial = new Material(activeTheme.NeonA)
+            {
+                name = "Hot Purple Wall Base Rail"
+            };
+            var hotPurple = new Color(1.55f, 0.18f, 3.2f, 1f);
+            SetMaterialColor(wallBaseAccentMaterial, hotPurple);
+            wallBaseAccentMaterial.EnableKeyword("_EMISSION");
+            if (wallBaseAccentMaterial.HasProperty("_EmissionColor"))
+            {
+                wallBaseAccentMaterial.SetColor("_EmissionColor", hotPurple);
+            }
+
+            return wallBaseAccentMaterial;
+        }
+
+        private static void SetMaterialColor(Material material, Color color)
+        {
+            if (material.HasProperty("_BaseColor"))
+            {
+                material.SetColor("_BaseColor", color);
+            }
+            else if (material.HasProperty("_Color"))
+            {
+                material.SetColor("_Color", color);
+            }
         }
 
         private static void RemoveCollider(GameObject target)
         {
             if (target != null && target.TryGetComponent<Collider>(out var collider))
+            {
+                Destroy(collider);
+            }
+        }
+
+        private static void RemoveCollidersInChildren(GameObject target)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            foreach (var collider in target.GetComponentsInChildren<Collider>(true))
             {
                 Destroy(collider);
             }
@@ -1254,6 +1491,11 @@ namespace ArenaShooter
                    name == "Corridor Wall" ||
                    name == "Gate Wall" ||
                    name == "Gate Connector Wall";
+        }
+
+        private static bool ShouldCreateWallBaseAccent(string name)
+        {
+            return IsStructuralWallName(name) || name == "Room Corridor Opening Pillar";
         }
 
         private static bool IsDestructibleName(string name)

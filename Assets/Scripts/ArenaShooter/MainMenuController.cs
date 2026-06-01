@@ -15,11 +15,11 @@ namespace ArenaShooter
         private const string GameSceneName = "SampleScene";
         private const string GeneratedRootName = "Generated Main Menu UI";
         private const string MusicSourceName = "Main Menu Theme Music";
-        private const string OpeningThemeResourcePath = "Audio/Iron_Labyrinth";
         private const float OpeningThemeStartTime = 53f;
         private const float DefaultThemeMusicTargetVolume = 1f;
         private const float ThemeMusicStartDelay = 0.5f;
         private const float ThemeMusicFadeDuration = 20f;
+        private const float StartupInputSuppressSeconds = 0.35f;
         private const float NavigationRepeatDelay = 0.22f;
         private const float GamepadNavigationPressThreshold = 0.55f;
         private const float GamepadNavigationReleaseThreshold = 0.25f;
@@ -35,14 +35,6 @@ namespace ArenaShooter
         private const float TitleIntroMaximumDeltaTime = 1f / 30f;
         private const float ReferenceCanvasWidth = 1920f;
         private const float ReferenceCanvasHeight = 1080f;
-
-        private static readonly string[] ThemeMusicResourcePaths =
-        {
-            OpeningThemeResourcePath,
-            "Audio/Weight_of_Iron",
-            "Audio/Hydraulics_of_the_Pit",
-            "Audio/Where_the_Iron_Falls",
-        };
 
         private readonly List<MenuButtonVisual> menuButtons = new();
 
@@ -93,10 +85,18 @@ namespace ArenaShooter
 
         private static readonly Sprite[] cornerDroidPoseSprites = new Sprite[CornerDroidPoseResourcePaths.Length];
         private static readonly Sprite[] cornerDroidPoseOccluderSprites = new Sprite[CornerDroidPoseResourcePaths.Length];
+        private static float startupInputSuppressedUntil = -1f;
 
         private void Start()
         {
             RebuildMenu();
+        }
+
+        public static void SuppressStartupInputBriefly()
+        {
+            startupInputSuppressedUntil = Mathf.Max(
+                startupInputSuppressedUntil,
+                Time.realtimeSinceStartup + StartupInputSuppressSeconds);
         }
 
         private void OnEnable()
@@ -185,7 +185,7 @@ namespace ArenaShooter
             audioSource.spatialBlend = 0f;
             if (!Application.isPlaying)
             {
-                audioSource.volume = themeMusicTargetVolume;
+                audioSource.volume = ScaleThemeMusicVolume(themeMusicTargetVolume);
             }
 
             if (Application.isPlaying && !audioSource.isPlaying)
@@ -212,7 +212,7 @@ namespace ArenaShooter
 
         private void PlayOpeningTheme()
         {
-            var clip = Resources.Load<AudioClip>(OpeningThemeResourcePath);
+            var clip = Resources.Load<AudioClip>(ArenaMusicLibrary.OpeningThemeResourcePath);
             if (clip == null)
             {
                 PlayRandomThemeTrack();
@@ -252,28 +252,33 @@ namespace ArenaShooter
             while (elapsed < ThemeMusicFadeDuration)
             {
                 elapsed += Time.unscaledDeltaTime;
-                themeMusicSource.volume = Mathf.Clamp01(elapsed / ThemeMusicFadeDuration) * themeMusicTargetVolume;
+                themeMusicSource.volume = ScaleThemeMusicVolume(Mathf.Clamp01(elapsed / ThemeMusicFadeDuration) * themeMusicTargetVolume);
                 yield return null;
             }
 
-            themeMusicSource.volume = themeMusicTargetVolume;
+            themeMusicSource.volume = ScaleThemeMusicVolume(themeMusicTargetVolume);
             themeMusicFadeCoroutine = null;
+        }
+
+        private static float ScaleThemeMusicVolume(float volume)
+        {
+            return volume * ArenaUserSettings.MusicVolume;
         }
 
         private void PlayRandomThemeTrack()
         {
-            if (themeMusicSource == null || ThemeMusicResourcePaths.Length == 0)
+            if (themeMusicSource == null || ArenaMusicLibrary.TrackResourcePaths.Length == 0)
             {
                 return;
             }
 
-            var index = Random.Range(0, ThemeMusicResourcePaths.Length);
-            if (ThemeMusicResourcePaths.Length > 1 && index == lastThemeMusicIndex)
+            var index = Random.Range(0, ArenaMusicLibrary.TrackResourcePaths.Length);
+            if (ArenaMusicLibrary.TrackResourcePaths.Length > 1 && index == lastThemeMusicIndex)
             {
-                index = (index + 1) % ThemeMusicResourcePaths.Length;
+                index = (index + 1) % ArenaMusicLibrary.TrackResourcePaths.Length;
             }
 
-            var clip = Resources.Load<AudioClip>(ThemeMusicResourcePaths[index]);
+            var clip = Resources.Load<AudioClip>(ArenaMusicLibrary.TrackResourcePaths[index]);
             if (clip == null)
             {
                 return;
@@ -666,6 +671,11 @@ namespace ArenaShooter
             UpdateButtonVisuals();
 
             if (!Application.isPlaying || menuButtons.Count == 0)
+            {
+                return;
+            }
+
+            if (Time.realtimeSinceStartup < startupInputSuppressedUntil)
             {
                 return;
             }

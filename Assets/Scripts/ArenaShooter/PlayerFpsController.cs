@@ -19,6 +19,7 @@ namespace ArenaShooter
         [SerializeField] private float dodgeCooldown = 0.7f;
         [SerializeField] private float normalFov = 62f;
         [SerializeField] private float aimedFov = 44f;
+        [SerializeField] private float vaultDuration = 0.48f;
 
         private CharacterController controller;
         private CombatantHealth health;
@@ -37,7 +38,6 @@ namespace ArenaShooter
         private InputAction lungeLeftAction;
         private InputAction lungeRightAction;
         private InputAction turretModeAction;
-        private InputAction restartAction;
         private float pitch;
         private float verticalVelocity;
         private float standingHeight = 1.9f;
@@ -68,6 +68,14 @@ namespace ArenaShooter
         private GameObject turretPreview;
         private Renderer[] turretPreviewRenderers;
         private bool turretPreviewValid;
+        private float vaultTimer;
+        private Vector3 vaultStart;
+        private Vector3 vaultApex;
+        private Vector3 vaultEnd;
+        private Collider vaultIgnoredCollider;
+        private const float VaultProbeDistance = 1.85f;
+        private const float VaultProbeRadius = 0.24f;
+        private const float VaultLandingGroundProbeHeight = 1.25f;
 
         public Camera PlayerCamera { get; private set; }
         public MatchController Match => match;
@@ -106,7 +114,6 @@ namespace ArenaShooter
             lungeLeftAction.Enable();
             lungeRightAction.Enable();
             turretModeAction.Enable();
-            restartAction.Enable();
         }
 
         private void OnDisable()
@@ -122,8 +129,8 @@ namespace ArenaShooter
             lungeLeftAction.Disable();
             lungeRightAction.Disable();
             turretModeAction.Disable();
-            restartAction.Disable();
             DestroyTurretPreview();
+            CancelVault();
         }
 
         private void Start()
@@ -139,19 +146,15 @@ namespace ArenaShooter
                 introWalker = GetComponent<SpawnIntroWalker>();
             }
 
-            if (restartAction.WasPressedThisFrame())
-            {
-                match?.RestartMatch();
-                return;
-            }
-
             if (health == null || !health.IsAlive || match == null || !match.IsMatchActive || (introWalker != null && introWalker.IsWalking))
             {
+                CancelVault();
                 return;
             }
 
-            if (match.IsFabricatorMenuOpen || Time.time < match.InputSuppressedUntil)
+            if (match.IsPauseMenuOpen || match.IsFabricatorMenuOpen || Time.time < match.InputSuppressedUntil)
             {
+                CancelVault();
                 weapons.SetAiming(false);
                 match.SetPlayerAiming(false);
                 viewModel?.SetMovementState(false, false);
@@ -170,6 +173,16 @@ namespace ArenaShooter
 
             UpdateLook();
 
+            if (vaultTimer > 0f)
+            {
+                weapons.SetAiming(false);
+                match.SetPlayerAiming(false);
+                viewModel?.SetMovementState(false, false);
+                DestroyTurretPreview();
+                UpdateVaultMovement();
+                return;
+            }
+
             if (match.IsTurretPlacementMode)
             {
                 weapons.SetAiming(false);
@@ -177,6 +190,12 @@ namespace ArenaShooter
                 UpdateStanceInput();
                 UpdateViewModelState();
                 UpdateMovement();
+                if (vaultTimer > 0f)
+                {
+                    CancelVault();
+                    return;
+                }
+
                 UpdateTurretPlacementMode();
                 return;
             }
@@ -186,6 +205,11 @@ namespace ArenaShooter
             UpdateAiming();
             UpdateViewModelState();
             UpdateMovement();
+
+            if (vaultTimer > 0f)
+            {
+                return;
+            }
 
             if (attackAction.IsPressed() && cameraPivot != null)
             {
@@ -346,7 +370,7 @@ namespace ArenaShooter
 
             var curvedMagnitude = Mathf.Pow(magnitude, 1.18f);
             var direction = look / magnitude;
-            return direction * (curvedMagnitude * gamepadLookDegreesPerSecond * Time.deltaTime);
+            return direction * (curvedMagnitude * gamepadLookDegreesPerSecond * ArenaUserSettings.ControllerLookScale * Time.deltaTime);
         }
 
         private void UpdateMovement()
@@ -389,6 +413,11 @@ namespace ArenaShooter
 
             if (controller.isGrounded && jumpAction.WasPressedThisFrame())
             {
+                if (TryBeginVault())
+                {
+                    return;
+                }
+
                 verticalVelocity = jumpSpeed;
             }
 
@@ -398,9 +427,215 @@ namespace ArenaShooter
             controller.Move(movement * Time.deltaTime);
         }
 
+        private bool TryBeginVault()
+        {
+            if (cameraPivot == null ||
+                controller == null ||
+                !controller.isGrounded ||
+                ResolveStance() != PlayerStance.Standing ||
+                (match != null && match.IsTurretPlacementMode))
+            {
+                return false;
+            }
+
+            var forward = cameraPivot.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude <= 0.001f)
+            {
+                forward = transform.forward;
+            }
+
+            forward.Normalize();
+            var origin = cameraPivot.position - Vector3.up * 0.18f;
+            var hits = Physics.SphereCastAll(origin, VaultProbeRadius, forward, VaultProbeDistance, ~0, QueryTriggerInteraction.Ignore);
+            if (hits == null || hits.Length == 0)
+            {
+                return false;
+            }
+
+            DestructibleArenaPiece.PlayerVaultSolution bestSolution = default;
+            var bestDistance = float.PositiveInfinity;
+            var found = false;
+            for (var i = 0; i < hits.Length; i++)
+            {
+                var hit = hits[i];
+                if (hit.collider == null || hit.collider.transform == transform)
+                {
+                    continue;
+                }
+
+                var destructible = hit.collider.GetComponentInParent<DestructibleArenaPiece>();
+                if (destructible == null ||
+                    !destructible.TryResolvePlayerVault(transform.position, forward, controller.radius, standingHeight, out var solution) ||
+                    !TryResolveVaultLanding(solution, out var adjustedSolution))
+                {
+                    continue;
+                }
+
+                if (hit.distance < bestDistance)
+                {
+                    bestDistance = hit.distance;
+                    bestSolution = adjustedSolution;
+                    found = true;
+                }
+            }
+
+            if (!found)
+            {
+                return false;
+            }
+
+            BeginVault(bestSolution);
+            return true;
+        }
+
+        private bool TryResolveVaultLanding(DestructibleArenaPiece.PlayerVaultSolution candidate, out DestructibleArenaPiece.PlayerVaultSolution adjusted)
+        {
+            adjusted = candidate;
+            var rayOrigin = candidate.ExitPosition + Vector3.up * VaultLandingGroundProbeHeight;
+            var groundDestructible = default(DestructibleArenaPiece);
+            if (!Physics.Raycast(rayOrigin, Vector3.down, out var groundHit, VaultLandingGroundProbeHeight + 1.6f, ~0, QueryTriggerInteraction.Ignore) ||
+                groundHit.normal.y < 0.55f ||
+                ((groundDestructible = groundHit.collider.GetComponentInParent<DestructibleArenaPiece>()) != null && !groundDestructible.IsFloorSurface()) ||
+                groundHit.collider.GetComponentInParent<CombatantHealth>() != null ||
+                groundHit.collider.GetComponentInParent<FabricatorStation>() != null ||
+                groundHit.collider.GetComponentInParent<HealingStation>() != null ||
+                groundHit.collider.GetComponentInParent<PlayerTurret>() != null)
+            {
+                return false;
+            }
+
+            var landing = candidate.ExitPosition;
+            landing.y = groundHit.point.y;
+            if (!IsVaultCapsuleClear(landing, candidate.SourceCollider))
+            {
+                return false;
+            }
+
+            var apex = candidate.ApexPosition;
+            apex.y = Mathf.Max(Mathf.Max(apex.y, landing.y + 0.62f), transform.position.y + 0.52f);
+            adjusted = new DestructibleArenaPiece.PlayerVaultSolution(candidate.EntryPosition, landing, apex, candidate.SourceCollider);
+            return true;
+        }
+
+        private bool IsVaultCapsuleClear(Vector3 position, Collider sourceCollider)
+        {
+            var radius = Mathf.Max(0.12f, controller.radius * 0.92f);
+            var height = Mathf.Max(standingHeight, radius * 2f + 0.05f);
+            var center = position + Vector3.up * (height * 0.5f);
+            var half = Mathf.Max(0f, height * 0.5f - radius);
+            var bottom = center - Vector3.up * half;
+            var top = center + Vector3.up * half;
+            var overlaps = Physics.OverlapCapsule(bottom, top, radius, ~0, QueryTriggerInteraction.Ignore);
+            for (var i = 0; i < overlaps.Length; i++)
+            {
+                var overlap = overlaps[i];
+                if (overlap == null ||
+                    overlap == sourceCollider ||
+                    overlap.transform == transform ||
+                    overlap.GetComponentInParent<PlayerFpsController>() == this)
+                {
+                    continue;
+                }
+
+                var destructible = overlap.GetComponentInParent<DestructibleArenaPiece>();
+                if (destructible != null && !destructible.IsFloorSurface())
+                {
+                    return false;
+                }
+
+                if (overlap.GetComponentInParent<CombatantHealth>() != null ||
+                    overlap.GetComponentInParent<FabricatorStation>() != null ||
+                    overlap.GetComponentInParent<HealingStation>() != null ||
+                    overlap.GetComponentInParent<PlayerTurret>() != null)
+                {
+                    return false;
+                }
+
+                if (!overlap.name.ToLowerInvariant().Contains("floor"))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private void BeginVault(DestructibleArenaPiece.PlayerVaultSolution solution)
+        {
+            vaultStart = transform.position;
+            vaultApex = solution.ApexPosition;
+            vaultEnd = solution.ExitPosition;
+            vaultTimer = vaultDuration;
+            vaultIgnoredCollider = solution.SourceCollider;
+            verticalVelocity = 0f;
+            evadeTimer = 0f;
+            crouchToggled = false;
+            proneToggled = false;
+            stancePressActive = false;
+            stanceHoldConsumed = false;
+            weapons.SetAiming(false);
+            match?.SetPlayerAiming(false);
+            if (vaultIgnoredCollider != null)
+            {
+                Physics.IgnoreCollision(controller, vaultIgnoredCollider, true);
+            }
+        }
+
+        private void CancelVault()
+        {
+            if (vaultTimer <= 0f && vaultIgnoredCollider == null)
+            {
+                return;
+            }
+
+            if (vaultIgnoredCollider != null && controller != null)
+            {
+                Physics.IgnoreCollision(controller, vaultIgnoredCollider, false);
+            }
+
+            vaultIgnoredCollider = null;
+            vaultTimer = 0f;
+            verticalVelocity = -1.5f;
+            visualPitch = 0f;
+            visualRoll = 0f;
+        }
+
+        private void UpdateVaultMovement()
+        {
+            var duration = Mathf.Max(0.05f, vaultDuration);
+            vaultTimer = Mathf.Max(0f, vaultTimer - Time.deltaTime);
+            var t = 1f - vaultTimer / duration;
+            var eased = Mathf.SmoothStep(0f, 1f, t);
+            var firstLeg = Vector3.Lerp(vaultStart, vaultApex, eased);
+            var secondLeg = Vector3.Lerp(vaultApex, vaultEnd, eased);
+            var target = Vector3.Lerp(firstLeg, secondLeg, eased);
+            controller.Move(target - transform.position);
+
+            visualPitch = Mathf.Sin(t * Mathf.PI) * -5.5f;
+            visualRoll = Mathf.Sin(t * Mathf.PI * 2f) * 2.2f;
+            UpdateStanceShape(PlayerStance.Standing);
+
+            if (vaultTimer > 0f)
+            {
+                return;
+            }
+
+            controller.Move(vaultEnd - transform.position);
+            if (vaultIgnoredCollider != null)
+            {
+                Physics.IgnoreCollision(controller, vaultIgnoredCollider, false);
+                vaultIgnoredCollider = null;
+            }
+
+            verticalVelocity = -1.5f;
+            visualPitch = 0f;
+            visualRoll = 0f;
+        }
+
         private void UpdateAbilityInput()
         {
-            if (Time.time < evadeCooldownUntil || evadeTimer > 0f || !controller.isGrounded)
+            if (Time.time < evadeCooldownUntil || evadeTimer > 0f || vaultTimer > 0f || !controller.isGrounded)
             {
                 return;
             }
@@ -657,8 +892,6 @@ namespace ArenaShooter
             turretModeAction = new InputAction("Turret Kit", InputActionType.Button, "<Keyboard>/4");
             turretModeAction.AddBinding("<Gamepad>/dpad/down");
 
-            restartAction = new InputAction("Restart", InputActionType.Button, "<Keyboard>/r");
-            restartAction.AddBinding("<Gamepad>/start");
         }
     }
 }

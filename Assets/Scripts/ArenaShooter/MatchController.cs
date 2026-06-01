@@ -4,6 +4,7 @@ using Unity.AI.Navigation;
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.InputSystem;
+using UnityEngine.SceneManagement;
 
 namespace ArenaShooter
 {
@@ -46,6 +47,7 @@ namespace ArenaShooter
         private const float AllOutWarSquadLowAmmoRatio = 0.25f;
         private const int AllOutWarCarriedMedPackHeal = 35;
         private const int AllOutWarCarriedAmmoCellAmount = 18;
+        private const string MainMenuSceneName = "MainMenu";
 
         private readonly List<WeaponPickup> activePickups = new();
         private readonly List<AmmoPickup> activeAmmoPickups = new();
@@ -77,8 +79,11 @@ namespace ArenaShooter
         private GameObject matchRoot;
         private ArenaTheme theme;
         private PrototypeHud hud;
+        private InGamePauseMenu pauseMenu;
+        private int pauseMenuInputConsumedFrame = -1;
         private ArenaLayout currentLayout;
         private GameObject playerObject;
+        private Camera playerCamera;
         private CombatantHealth playerCombatant;
         private CombatantHealth opponentCombatant;
         private WeaponInventory playerWeapons;
@@ -254,6 +259,7 @@ namespace ArenaShooter
         }
 
         public bool IsMatchActive { get; private set; }
+        public bool IsPauseMenuOpen { get; private set; }
         public bool IsAllOutWarMode => currentGameMode == ArenaGameMode.AllOutWar;
         public int AllOutWarArmyCount => allOutWarRosterRemaining != null
             ? allOutWarRosterRemaining.Length
@@ -267,6 +273,8 @@ namespace ArenaShooter
         public int WeaponUpgradeLevel => damageUpgradeLevel;
         public int TurretKits => turretKits;
         public bool IsTurretPlacementMode => turretPlacementMode;
+        public Transform PlayerTransform => playerObject != null ? playerObject.transform : null;
+        public Camera PlayerCamera => playerCamera;
         public float CurrentNormalDroidHealth => 52f + Mathf.Max(1, currentWave) * 9f;
         public int NextUpgradeCost => 45 + damageUpgradeLevel * 35;
         public IReadOnlyList<CombatantHealth> ActiveDroids => activeDroids;
@@ -2476,11 +2484,48 @@ namespace ArenaShooter
 
             var count = 0;
             var radiusSqr = radius * radius;
-            var targets = new List<CombatantHealth>();
-            CollectEnemyTargets(seeker, targets);
-            foreach (var target in targets)
+            CountEnemyDroidTargetNearPosition(seeker, playerCombatant, position, radiusSqr, ref count);
+
+            for (var i = activeDroids.Count - 1; i >= 0; i--)
             {
-                CountDroidTargetNearPosition(target, position, radiusSqr, ref count);
+                var droid = activeDroids[i];
+                if (droid == null)
+                {
+                    activeDroids.RemoveAt(i);
+                    continue;
+                }
+
+                CountEnemyDroidTargetNearPosition(seeker, droid, position, radiusSqr, ref count);
+            }
+
+            for (var i = activeCompanions.Count - 1; i >= 0; i--)
+            {
+                var companion = activeCompanions[i];
+                if (companion == null)
+                {
+                    activeCompanions.RemoveAt(i);
+                    continue;
+                }
+
+                if (companion.TryGetComponent<CombatantHealth>(out var companionHealth))
+                {
+                    CountEnemyDroidTargetNearPosition(seeker, companionHealth, position, radiusSqr, ref count);
+                }
+            }
+
+            for (var i = activeTurrets.Count - 1; i >= 0; i--)
+            {
+                var turret = activeTurrets[i];
+                if (turret == null)
+                {
+                    activeTurrets.RemoveAt(i);
+                    continue;
+                }
+
+                if (turret.TryGetComponent<CombatantHealth>(out var turretHealth))
+                {
+                    CountEnemyDroidTargetNearPosition(seeker, turretHealth, position, radiusSqr, ref count);
+                }
             }
 
             return count;
@@ -2541,11 +2586,48 @@ namespace ArenaShooter
                 return CountNearbyDroidTargets(from, radius, seeker);
             }
 
-            var targets = new List<CombatantHealth>();
-            CollectEnemyTargets(seeker, targets);
-            foreach (var target in targets)
+            CountEnemyDroidTargetNearRoute(seeker, playerCombatant, from, route, lengthSqr, radius, ref count);
+
+            for (var i = activeDroids.Count - 1; i >= 0; i--)
             {
-                CountDroidTargetNearRoute(target, from, route, lengthSqr, radius, ref count);
+                var droid = activeDroids[i];
+                if (droid == null)
+                {
+                    activeDroids.RemoveAt(i);
+                    continue;
+                }
+
+                CountEnemyDroidTargetNearRoute(seeker, droid, from, route, lengthSqr, radius, ref count);
+            }
+
+            for (var i = activeCompanions.Count - 1; i >= 0; i--)
+            {
+                var companion = activeCompanions[i];
+                if (companion == null)
+                {
+                    activeCompanions.RemoveAt(i);
+                    continue;
+                }
+
+                if (companion.TryGetComponent<CombatantHealth>(out var companionHealth))
+                {
+                    CountEnemyDroidTargetNearRoute(seeker, companionHealth, from, route, lengthSqr, radius, ref count);
+                }
+            }
+
+            for (var i = activeTurrets.Count - 1; i >= 0; i--)
+            {
+                var turret = activeTurrets[i];
+                if (turret == null)
+                {
+                    activeTurrets.RemoveAt(i);
+                    continue;
+                }
+
+                if (turret.TryGetComponent<CombatantHealth>(out var turretHealth))
+                {
+                    CountEnemyDroidTargetNearRoute(seeker, turretHealth, from, route, lengthSqr, radius, ref count);
+                }
             }
 
             return count;
@@ -2650,6 +2732,16 @@ namespace ArenaShooter
             }
         }
 
+        private static void CountEnemyDroidTargetNearPosition(CombatantHealth seeker, CombatantHealth target, Vector3 position, float radiusSqr, ref int count)
+        {
+            if (target == null || !target.IsAlive || target == seeker || !CombatantTeam.AreEnemies(seeker, target))
+            {
+                return;
+            }
+
+            CountDroidTargetNearPosition(target, position, radiusSqr, ref count);
+        }
+
         private static void CountDroidTargetNearRoute(CombatantHealth target, Vector3 from, Vector3 route, float lengthSqr, float radius, ref int count)
         {
             if (target == null || !target.IsAlive)
@@ -2667,6 +2759,16 @@ namespace ArenaShooter
             }
         }
 
+        private static void CountEnemyDroidTargetNearRoute(CombatantHealth seeker, CombatantHealth target, Vector3 from, Vector3 route, float lengthSqr, float radius, ref int count)
+        {
+            if (target == null || !target.IsAlive || target == seeker || !CombatantTeam.AreEnemies(seeker, target))
+            {
+                return;
+            }
+
+            CountDroidTargetNearRoute(target, from, route, lengthSqr, radius, ref count);
+        }
+
         public void SetPlayerAiming(bool aiming)
         {
             hud?.SetAiming(aiming);
@@ -2677,9 +2779,53 @@ namespace ArenaShooter
             StartNewMatch();
         }
 
+        private void Update()
+        {
+            if (WasPauseTogglePressed())
+            {
+                TogglePauseMenu();
+            }
+        }
+
         public void RestartMatch()
         {
+            ForceClosePauseMenu(false);
             StartNewMatch();
+        }
+
+        public void TogglePauseMenu()
+        {
+            if (IsPauseMenuOpen)
+            {
+                ResumeGame();
+                return;
+            }
+
+            OpenPauseMenu();
+        }
+
+        public void ResumeGame()
+        {
+            if (!IsPauseMenuOpen)
+            {
+                return;
+            }
+
+            ForceClosePauseMenu(true);
+        }
+
+        public void RestartFromPauseMenu()
+        {
+            ForceClosePauseMenu(false);
+            StartNewMatch();
+        }
+
+        public void QuitToMainMenu()
+        {
+            ForceClosePauseMenu(false);
+            ClearPreviousMatch();
+            MainMenuController.SuppressStartupInputBriefly();
+            SceneManager.LoadScene(MainMenuSceneName);
         }
 
         public void NotifyPickupTaken(WeaponPickup pickup)
@@ -2730,6 +2876,7 @@ namespace ArenaShooter
 
         private void ResetSharedMatchState()
         {
+            ForceClosePauseMenu(false);
             StopAllCoroutines();
             IsMatchActive = false;
             activePickups.Clear();
@@ -2843,6 +2990,7 @@ namespace ArenaShooter
 
             playerCombatant.Died += OnPlayerDied;
             InitializeAllOutWarSpawning();
+            CreateAllOutWarDomeScoreboards(layout);
 
             IsMatchActive = true;
             SpawnInitialAllOutWarSoldiers(layout, player.transform);
@@ -2924,6 +3072,8 @@ namespace ArenaShooter
                 Destroy(hud.gameObject);
                 hud = null;
             }
+
+            playerCamera = null;
         }
 
         private void DisableStarterCameras()
@@ -2972,6 +3122,7 @@ namespace ArenaShooter
             cameraObject.transform.SetParent(player.transform, false);
             cameraObject.transform.localPosition = new Vector3(0f, 0.64f, 0f);
             var camera = cameraObject.AddComponent<Camera>();
+            playerCamera = camera;
             camera.nearClipPlane = 0.03f;
             camera.fieldOfView = 62f;
             camera.rect = new Rect(0f, 0f, 1f, 1f);
@@ -3374,7 +3525,7 @@ namespace ArenaShooter
 
         private IEnumerator RunAllOutWarLoop(Transform player, ArenaLayout layout)
         {
-            hud?.SetWaveCountdown("ALL OUT WAR");
+            hud?.SetWaveCountdown("");
             yield return new WaitForSeconds(1.25f);
             hud?.SetWaveCountdown("");
 
@@ -3565,6 +3716,7 @@ namespace ArenaShooter
 
         private GameObject CreateDroid(Vector3 position, Quaternion rotation, ArenaLayout layout, Transform player, int wave, int squadMemberIndex, int teamId = -1)
         {
+            var playerCamera = player != null ? player.GetComponentInChildren<Camera>() : null;
             var droid = GameObject.CreatePrimitive(PrimitiveType.Capsule);
             droid.name = teamId >= 0 ? $"Army {teamId} Battle Droid" : $"Wave {wave} Battle Droid";
             droid.transform.SetParent(matchRoot.transform, false);
@@ -3612,7 +3764,7 @@ namespace ArenaShooter
                 Ammo = teamId >= 0 ? 36 : 999
             });
 
-            droid.AddComponent<CombatantVisualWalkAnimator>();
+            droid.AddComponent<CombatantVisualWalkAnimator>().ConfigureLod(playerCamera);
             droid.AddComponent<DroidCrouchPose>();
             var ai = droid.AddComponent<DroidController>();
             if (teamId >= 0)
@@ -3627,9 +3779,10 @@ namespace ArenaShooter
             {
                 ai.Configure(this, layout, player, wave, squadMemberIndex);
             }
-            droid.AddComponent<FootstepAudio>().Configure(false);
+            var footstepAudio = droid.AddComponent<FootstepAudio>();
+            footstepAudio.Configure(false);
+            footstepAudio.ConfigureLod(playerCamera);
 
-            var playerCamera = player.GetComponentInChildren<Camera>();
             if (playerCamera != null)
             {
                 var barObject = new GameObject("Droid Health Bar");
@@ -5428,6 +5581,114 @@ namespace ArenaShooter
             hud.BindWaveState(this);
             hud.SetCenterMessage("");
             hud.SetWaveCountdown("");
+            EnsurePauseMenu();
+        }
+
+        private void EnsurePauseMenu()
+        {
+            if (pauseMenu != null)
+            {
+                return;
+            }
+
+            var menuObject = new GameObject("In-Game Pause Menu");
+            menuObject.transform.SetParent(transform, false);
+            pauseMenu = menuObject.AddComponent<InGamePauseMenu>();
+            pauseMenu.Build(this);
+        }
+
+        private void OpenPauseMenu()
+        {
+            if (matchRoot == null)
+            {
+                return;
+            }
+
+            if (IsFabricatorMenuOpen)
+            {
+                HideFabricatorMenu();
+            }
+
+            turretPlacementMode = false;
+            playerWeapons?.SetAiming(false);
+            SetPlayerAiming(false);
+            EnsurePauseMenu();
+            IsPauseMenuOpen = true;
+            Time.timeScale = 0f;
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
+            pauseMenu.ShowMain();
+        }
+
+        private void ForceClosePauseMenu(bool restoreGameplayCursor)
+        {
+            var wasOpen = IsPauseMenuOpen;
+            Time.timeScale = 1f;
+            IsPauseMenuOpen = false;
+            if (wasOpen)
+            {
+                pauseMenuInputConsumedFrame = Time.frameCount;
+            }
+
+            if (pauseMenu != null)
+            {
+                pauseMenu.Hide();
+            }
+
+            if (!restoreGameplayCursor)
+            {
+                return;
+            }
+
+            if (IsMatchActive && playerCombatant != null && playerCombatant.IsAlive)
+            {
+                Cursor.lockState = CursorLockMode.Locked;
+                Cursor.visible = false;
+            }
+            else
+            {
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+            }
+        }
+
+        private bool WasPauseTogglePressed()
+        {
+            if (Time.frameCount == pauseMenuInputConsumedFrame)
+            {
+                return false;
+            }
+
+            if (!IsPauseMenuOpen)
+            {
+                var keyboard = Keyboard.current;
+                if (keyboard != null && keyboard.escapeKey.wasPressedThisFrame)
+                {
+                    return true;
+                }
+            }
+
+            foreach (var gamepad in Gamepad.all)
+            {
+                if (gamepad.startButton.wasPressedThisFrame)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void CreateAllOutWarDomeScoreboards(ArenaLayout layout)
+        {
+            if (matchRoot == null || layout == null)
+            {
+                return;
+            }
+
+            var scoreboardObject = new GameObject("All Out War Dome Scoreboards");
+            scoreboardObject.transform.SetParent(matchRoot.transform, false);
+            scoreboardObject.AddComponent<AllOutWarDomeScoreboard>().Build(this, layout, wallHeight);
         }
 
         private void OnDroidDied(CombatantHealth combatant)
@@ -5639,7 +5900,7 @@ namespace ArenaShooter
 
         private static string RestartPrompt()
         {
-            return Gamepad.current != null ? "Press Start to regenerate the arena" : "Press R to regenerate the arena";
+            return Gamepad.current != null ? "Press Start for menu to restart" : "Press Esc for menu to restart";
         }
     }
 }

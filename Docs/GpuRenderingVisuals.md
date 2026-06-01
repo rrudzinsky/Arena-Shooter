@@ -6,12 +6,13 @@ This file is the compact implementation contract and invariant source of truth f
 
 Arena Shooter uses a neon, high-contrast visual language. Gameplay objects are assigned stylized outline categories, then a URP renderer feature builds per-category masks and composites colored outlines back over the scene.
 
-The goal is readable combat: walls, floors, droids, guns, ammo, and medical resources should remain visually distinct even in dense All Out War fights.
+The goal is readable combat with clean neon silhouettes: walls, floors, droids, guns, ammo, and medical resources should remain visually distinct even in dense All Out War fights without turning into fuzzy over-bright bloom.
 
 ## Key Code Areas
 
-- `Assets/Scripts/ArenaShooter/Rendering/DroidOutlineRendererFeature.cs` owns the URP outline mask and composite passes.
+- `Assets/Scripts/ArenaShooter/Rendering/DroidOutlineRendererFeature.cs` owns the URP outline mask and composite passes. The class keeps its legacy name for renderer-asset compatibility, but it is the general stylized outline feature.
 - `Assets/Scripts/ArenaShooter/DroidRenderSetup.cs` assigns rendering layer masks, outline categories, colors, and shadow/probe settings.
+- `Assets/Scripts/ArenaShooter/ArenaTheme.cs` creates shared matte, neon line, beam, and generated-asset materials.
 - `Assets/Shaders/DroidOutlineMask.shader` writes outline mask data.
 - `Assets/Shaders/DroidOutlineComposite.shader` detects mask edges and adds glow color to the scene.
 - `Assets/Shaders/InvisibleOutlineProxy.shader` supports invisible outline sources for destructible wall bodies.
@@ -31,6 +32,8 @@ The goal is readable combat: walls, floors, droids, guns, ammo, and medical reso
 
 Each category maps to a rendering layer mask and outline color in `DroidRenderSetup`. The renderer feature's default bands must stay aligned with those masks.
 
+Each outline band also has a presentation profile: hard-edge thickness, glow radius, glow strength, intensity, normal-edge contribution, and distance fade. This lets wall silhouettes stay thin and clean while droids, pickups, and guns remain readable.
+
 ## Invariants
 
 - Renderers that should receive outlines must have their `renderingLayerMask` assigned through `DroidRenderSetup`.
@@ -38,8 +41,13 @@ Each category maps to a rendering layer mask and outline color in `DroidRenderSe
 - The outline feature should run only for base cameras.
 - Mask passes render opaque geometry for each enabled outline band.
 - Composite passes should preserve the scene color and add outline glow, not replace the whole frame except in diagnostic modes.
+- Outline presentation should use a crisp neon core plus controlled halo. Avoid returning to one global hot-blue fuzzy bloom for every category.
+- Wall and pillar screen-space outlines should tune silhouette/alpha edges separately from normal/internal side lines. Top silhouettes should stay restrained while side lines can keep the brighter cyan reference style.
+- Shared neon materials should use the same cleaner cyan/magenta/violet language as the outline pass instead of very high-intensity hot-pink bloom.
 - Distance fading should keep far outlines readable without letting distant glow dominate the screen.
 - Destructible walls that need wall outlines should use invisible outline proxy geometry instead of relying only on the changing damaged body mesh.
+- Destructible wall proxies define the surviving silhouette shape. Shot/shatter damage contours use the shared wall-line color and should own torn edges where missing shot chunks border surviving material.
+- Wall/pillar base accent geometry is visual-only. It should not add collision, destructible state, NavMesh geometry, or gameplay meaning.
 - The shield dome is visual backdrop geometry. Physical All Out War boundary blocking belongs to the arena boundary ring, not dome mesh collision.
 
 ## Diagnostics
@@ -58,4 +66,3 @@ Use diagnostics when outlines disappear, show the wrong color, vanish by distanc
 ## Related Docs
 
 - `Docs/DesignNotes/GpuRenderingVisuals_Explained.md` is the narrative explanation for human/design understanding.
-- `Docs/DestructibleArenaBlocks.md` explains how destructible wall outline proxies and damage contours fit into the visual style.

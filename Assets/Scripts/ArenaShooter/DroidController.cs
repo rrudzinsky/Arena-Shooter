@@ -20,10 +20,21 @@ namespace ArenaShooter
         private const float AllOutWarHealPickupSearchRadius = 30f;
         private const float AllOutWarHealResourceDangerRadius = 8f;
         private const float AllOutWarHealRouteDangerRadius = 4.5f;
+        private const float AllOutWarCriticalHealRatio = 0.22f;
         private const int AllOutWarAmmoSeekThreshold = 9;
         private const float AllOutWarAmmoPickupSearchRadius = 34f;
         private const float AllOutWarAmmoResourceDangerRadius = 8f;
         private const float AllOutWarAmmoRouteDangerRadius = 4.5f;
+        private const float NavMeshIntermediateCornerAdvanceDistance = 1.12f;
+        private static readonly bool AllOutWarAiDebugLogs = false;
+        private static readonly bool AllOutWarPerformanceDebugLogs = false;
+        private const float AllOutWarFullLodDistance = 34f;
+        private const float AllOutWarReducedLodDistance = 88f;
+        private const float AllOutWarVisibleLodMemorySeconds = 2.25f;
+        private const float AllOutWarReducedTargetScanInterval = 0.32f;
+        private const float AllOutWarBackgroundTargetScanInterval = 0.95f;
+        private const float AllOutWarReducedLosInterval = 0.18f;
+        private const float AllOutWarBackgroundLosInterval = 0.48f;
 
         private enum SquadRole
         {
@@ -39,6 +50,13 @@ namespace ArenaShooter
             RetreatForHeal,
             Resupply,
             LastStand
+        }
+
+        private enum AllOutWarPerformanceTier
+        {
+            Full,
+            Reduced,
+            Background
         }
 
         private readonly List<Vector2Int> path = new();
@@ -86,18 +104,36 @@ namespace ArenaShooter
         private AmmoPickup ammoPickupTarget;
         private TacticalSurvivalState survivalState;
         private SquadRole squadRole;
+        private AllOutWarPerformanceTier allOutWarPerformanceTier = AllOutWarPerformanceTier.Full;
+        private Camera allOutWarPlayerCamera;
         private int allOutWarTeamId = -1;
         private int allOutWarObjectiveSeed;
         private int allOutWarRoleIndex;
         private int allOutWarSquadId;
         private int allOutWarSlotIndex;
         private int allOutWarObjectiveVersion = -1;
+        private float nextAllOutWarLodAssessmentAt;
+        private float nextAllOutWarResourceShareAt;
+        private float nextTargetScanAt;
+        private float nextCurrentTargetLosAt;
+        private float lastPlayerVisibleAt = float.NegativeInfinity;
+        private CombatantHealth cachedVisibleTarget;
+        private CombatantHealth cachedLosTarget;
+        private bool cachedCurrentTargetLos;
         private bool autonomousWarMode;
         private bool allOutWarForceObjectiveRefresh;
         private bool hasLastPosition;
         private bool wasIntroWalking;
         private bool wasSeeingPlayer;
         private CombatantHealth lastReportedSquadTarget;
+        private static int fullTierFrames;
+        private static int reducedTierFrames;
+        private static int backgroundTierFrames;
+        private static int targetScansThisSecond;
+        private static int losChecksThisSecond;
+        private static int pathRebuildsThisSecond;
+        private static int beamVisualsThisSecond;
+        private static float nextPerformanceLogAt;
 
         private void Awake()
         {
@@ -190,11 +226,17 @@ namespace ArenaShooter
 
             if (autonomousWarMode)
             {
-                match.TryDistributeAllOutWarSquadResources(health, transform.position);
+                UpdateAllOutWarPerformanceTier();
+                RegisterAllOutWarTierFrame(allOutWarPerformanceTier);
+                if (Time.time >= nextAllOutWarResourceShareAt)
+                {
+                    nextAllOutWarResourceShareAt = Time.time + GetAllOutWarResourceShareInterval();
+                    match.TryDistributeAllOutWarSquadResources(health, transform.position);
+                }
             }
 
             var eye = transform.position + Vector3.up * 0.68f;
-            var activeTarget = FindBestVisibleTarget(eye);
+            var activeTarget = autonomousWarMode ? FindBestVisibleTargetForAllOutWarTier(eye) : FindBestVisibleTarget(eye);
             if (!autonomousWarMode && activeTarget == null)
             {
                 activeTarget = match.GetBestEnemyTarget(health, transform.position);
@@ -251,7 +293,9 @@ namespace ArenaShooter
             var playerEye = player.position + Vector3.up * 0.64f;
             var toPlayer = playerEye - eye;
             var flatToPlayer = Flatten(player.position - transform.position);
-            var canSeePlayer = CanSeePlayer(eye, playerEye, toPlayer);
+            var canSeePlayer = autonomousWarMode
+                ? CanSeeCurrentTargetForAllOutWarTier(eye, playerEye, toPlayer)
+                : CanSeePlayer(eye, playerEye, toPlayer);
             if (autonomousWarMode && !canSeePlayer && Time.time >= playerKnownUntil)
             {
                 match.ReportAllOutWarSquadSignal(health, MatchController.AllOutWarSquadSignal.ContactLost, lastKnownPlayerPosition, null);
@@ -325,6 +369,14 @@ namespace ArenaShooter
                 return;
             }
 
+            if (player == null)
+            {
+                blasterRig?.ClearAim();
+                hasLastPosition = true;
+                lastPosition = transform.position;
+                return;
+            }
+
             UpdateCrouch(canSeePlayer);
 
             if (canSeePlayer)
@@ -392,6 +444,72 @@ namespace ArenaShooter
             return best;
         }
 
+        private CombatantHealth FindBestVisibleTargetForAllOutWarTier(Vector3 eye)
+        {
+            var interval = allOutWarPerformanceTier switch
+            {
+                AllOutWarPerformanceTier.Background => AllOutWarBackgroundTargetScanInterval,
+                AllOutWarPerformanceTier.Reduced => AllOutWarReducedTargetScanInterval,
+                _ => 0f
+            };
+
+            if (Time.time < nextTargetScanAt)
+            {
+                return cachedVisibleTarget != null && cachedVisibleTarget.IsAlive ? cachedVisibleTarget : null;
+            }
+
+            nextTargetScanAt = interval > 0f
+                ? Time.time + interval + Random.Range(0f, interval * 0.35f)
+                : Time.time;
+            RegisterAllOutWarTargetScan();
+            cachedVisibleTarget = FindBestVisibleTarget(eye);
+            if (cachedVisibleTarget != null && IsPlayerCombatant(cachedVisibleTarget))
+            {
+                lastPlayerVisibleAt = Time.time;
+            }
+
+            return cachedVisibleTarget;
+        }
+
+        private bool CanSeeCurrentTargetForAllOutWarTier(Vector3 eye, Vector3 targetEye, Vector3 toTarget)
+        {
+            var targetHealth = player != null ? player.GetComponentInParent<CombatantHealth>() : null;
+            if (targetHealth == null || !targetHealth.IsAlive)
+            {
+                cachedLosTarget = null;
+                cachedCurrentTargetLos = false;
+                return false;
+            }
+
+            var interval = allOutWarPerformanceTier switch
+            {
+                AllOutWarPerformanceTier.Background => AllOutWarBackgroundLosInterval,
+                AllOutWarPerformanceTier.Reduced => AllOutWarReducedLosInterval,
+                _ => 0f
+            };
+
+            if (cachedLosTarget == targetHealth && Time.time < nextCurrentTargetLosAt)
+            {
+                return cachedCurrentTargetLos;
+            }
+
+            cachedLosTarget = targetHealth;
+            nextCurrentTargetLosAt = interval > 0f
+                ? Time.time + interval + Random.Range(0f, interval * 0.35f)
+                : Time.time;
+            cachedCurrentTargetLos = CanSeePlayer(eye, targetEye, toTarget);
+            if (cachedCurrentTargetLos && IsPlayerCombatant(targetHealth))
+            {
+                lastPlayerVisibleAt = Time.time;
+                if (allOutWarPerformanceTier == AllOutWarPerformanceTier.Background)
+                {
+                    allOutWarPerformanceTier = AllOutWarPerformanceTier.Reduced;
+                }
+            }
+
+            return cachedCurrentTargetLos;
+        }
+
         private void ForceHuntTarget()
         {
             if (autonomousWarMode)
@@ -425,6 +543,103 @@ namespace ArenaShooter
             repathAt = 0f;
             recoveryUntil = 0f;
             stuckTimer = 0f;
+        }
+
+        private void UpdateAllOutWarPerformanceTier()
+        {
+            if (!autonomousWarMode || match == null)
+            {
+                allOutWarPerformanceTier = AllOutWarPerformanceTier.Full;
+                return;
+            }
+
+            if (Time.time < nextAllOutWarLodAssessmentAt)
+            {
+                return;
+            }
+
+            var currentTier = allOutWarPerformanceTier;
+            var interval = currentTier switch
+            {
+                AllOutWarPerformanceTier.Background => 0.75f,
+                AllOutWarPerformanceTier.Reduced => 0.38f,
+                _ => 0.16f
+            };
+            nextAllOutWarLodAssessmentAt = Time.time + interval + Random.Range(0f, interval * 0.35f);
+
+            var playerTransform = match.PlayerTransform;
+            if (playerTransform == null)
+            {
+                allOutWarPerformanceTier = AllOutWarPerformanceTier.Full;
+                return;
+            }
+
+            allOutWarPlayerCamera ??= match.PlayerCamera;
+            var playerDelta = transform.position - playerTransform.position;
+            playerDelta.y = 0f;
+            var playerDistanceSqr = playerDelta.sqrMagnitude;
+            var inCameraView = IsInPlayerCameraView(allOutWarPlayerCamera, transform.position + Vector3.up * 0.9f);
+            if (inCameraView)
+            {
+                lastPlayerVisibleAt = Time.time;
+            }
+
+            var playerRelevant =
+                playerDistanceSqr <= AllOutWarFullLodDistance * AllOutWarFullLodDistance ||
+                Time.time - lastPlayerVisibleAt <= AllOutWarVisibleLodMemorySeconds ||
+                Time.time < underFireUntil ||
+                (player != null && player == playerTransform && Time.time < playerKnownUntil);
+
+            var nextTier = playerRelevant
+                ? AllOutWarPerformanceTier.Full
+                : playerDistanceSqr <= AllOutWarReducedLodDistance * AllOutWarReducedLodDistance || inCameraView
+                    ? AllOutWarPerformanceTier.Reduced
+                    : AllOutWarPerformanceTier.Background;
+
+            if (nextTier != allOutWarPerformanceTier)
+            {
+                allOutWarPerformanceTier = nextTier;
+                nextTargetScanAt = 0f;
+                nextCurrentTargetLosAt = 0f;
+                if (nextTier == AllOutWarPerformanceTier.Full)
+                {
+                    repathAt = 0f;
+                }
+            }
+        }
+
+        private static bool IsInPlayerCameraView(Camera camera, Vector3 worldPoint)
+        {
+            if (camera == null)
+            {
+                return false;
+            }
+
+            var viewport = camera.WorldToViewportPoint(worldPoint);
+            const float margin = 0.12f;
+            return viewport.z > 0f &&
+                viewport.x >= -margin &&
+                viewport.x <= 1f + margin &&
+                viewport.y >= -margin &&
+                viewport.y <= 1f + margin;
+        }
+
+        private bool IsPlayerCombatant(CombatantHealth target)
+        {
+            var playerTransform = match != null ? match.PlayerTransform : null;
+            return target != null &&
+                playerTransform != null &&
+                (target.transform == playerTransform || target.transform.IsChildOf(playerTransform));
+        }
+
+        private float GetAllOutWarResourceShareInterval()
+        {
+            return allOutWarPerformanceTier switch
+            {
+                AllOutWarPerformanceTier.Background => Random.Range(0.85f, 1.25f),
+                AllOutWarPerformanceTier.Reduced => Random.Range(0.35f, 0.65f),
+                _ => Random.Range(0.12f, 0.24f)
+            };
         }
 
         private Vector3 GetHuntDestination(bool canSeePlayer)
@@ -568,16 +783,30 @@ namespace ArenaShooter
                 Random.Range(-aimSpreadDegrees, aimSpreadDegrees),
                 0f) * shotDirection.normalized;
 
-            if (weapons.TryFire(shotOrigin, noisyDirection) && autonomousWarMode && player != null)
+            var showPresentation = !autonomousWarMode || allOutWarPerformanceTier != AllOutWarPerformanceTier.Background;
+            if (weapons.TryFire(shotOrigin, noisyDirection, showPresentation))
             {
-                var targetHealth = player.GetComponentInParent<CombatantHealth>();
-                match.ReportAllOutWarSquadSignal(health, MatchController.AllOutWarSquadSignal.ShotsExchanged, player.position, targetHealth);
+                if (autonomousWarMode && showPresentation)
+                {
+                    RegisterAllOutWarBeamVisual();
+                }
+
+                if (autonomousWarMode && player != null)
+                {
+                    var targetHealth = player.GetComponentInParent<CombatantHealth>();
+                    match.ReportAllOutWarSquadSignal(health, MatchController.AllOutWarSquadSignal.ShotsExchanged, player.position, targetHealth);
+                }
             }
         }
 
         private bool ShouldMoveToCover(bool canSeePlayer)
         {
             if (!canSeePlayer)
+            {
+                return false;
+            }
+
+            if (autonomousWarMode && allOutWarPerformanceTier == AllOutWarPerformanceTier.Background)
             {
                 return false;
             }
@@ -751,6 +980,7 @@ namespace ArenaShooter
             {
                 if (!HasSafeAllOutWarHealingDestination())
                 {
+                    LogAllOutWarAiDebug("Healing destination became unsafe; releasing health runner.");
                     ClearHealingTargets();
                     return ResumeAllOutWarFrontOrCombat(canSeePlayer);
                 }
@@ -875,6 +1105,7 @@ namespace ArenaShooter
             {
                 if (autonomousWarMode && !IsAllOutWarHealingDestinationSafe(healthPickupTarget.transform.position))
                 {
+                    LogAllOutWarAiDebug("Health pickup route became unsafe; releasing health runner.");
                     ClearHealingTargets();
                     return ResumeAllOutWarFrontOrCombat(canSeePlayer);
                 }
@@ -889,6 +1120,7 @@ namespace ArenaShooter
             {
                 if (autonomousWarMode && !IsAllOutWarHealingDestinationSafe(healingStationTarget.transform.position))
                 {
+                    LogAllOutWarAiDebug("Healing station route became unsafe; releasing health runner.");
                     ClearHealingTargets();
                     return ResumeAllOutWarFrontOrCombat(canSeePlayer);
                 }
@@ -1062,6 +1294,7 @@ namespace ArenaShooter
                 ClearCurrentPath();
                 repathAt = 0f;
                 match.ReportAllOutWarSquadLogisticsObjective(health, pickup.transform.position, true);
+                LogAllOutWarAiDebug("Started safe health pickup retreat.");
                 return true;
             }
 
@@ -1083,9 +1316,52 @@ namespace ArenaShooter
                 ClearCurrentPath();
                 repathAt = 0f;
                 match.ReportAllOutWarSquadLogisticsObjective(health, station.transform.position, true);
+                LogAllOutWarAiDebug("Started safe healing station retreat.");
                 return true;
             }
 
+            if (IsCriticallyWoundedForAllOutWarHealing() && TryBeginCriticalAllOutWarHealingRetreat())
+            {
+                LogAllOutWarAiDebug("Started critical healing retreat with route danger relaxed.");
+                return true;
+            }
+
+            LogAllOutWarAiDebug("No safe healing retreat found.");
+            return false;
+        }
+
+        private bool TryBeginCriticalAllOutWarHealingRetreat()
+        {
+            if (match == null || !match.TryClaimAllOutWarHealthRunner(health))
+            {
+                return false;
+            }
+
+            if (match.TryFindNearestHealthPickup(transform.position, AllOutWarHealPickupSearchRadius, out var pickup) &&
+                IsAllOutWarHealingDestinationOpen(pickup.transform.position))
+            {
+                healthPickupTarget = pickup;
+                healingStationTarget = null;
+                healingDestination = pickup.transform.position + Vector3.up * 1.1f;
+                ClearCurrentPath();
+                repathAt = 0f;
+                match.ReportAllOutWarSquadLogisticsObjective(health, pickup.transform.position, true);
+                return true;
+            }
+
+            if (match.TryFindNearestHealingStation(transform.position, out var station) &&
+                IsAllOutWarHealingDestinationOpen(station.transform.position))
+            {
+                healingStationTarget = station;
+                healthPickupTarget = null;
+                healingDestination = station.transform.position + Vector3.up * 1.1f;
+                ClearCurrentPath();
+                repathAt = 0f;
+                match.ReportAllOutWarSquadLogisticsObjective(health, station.transform.position, true);
+                return true;
+            }
+
+            match.ReleaseAllOutWarHealthRunner(health);
             return false;
         }
 
@@ -1111,8 +1387,27 @@ namespace ArenaShooter
                 return false;
             }
 
+            if (IsCriticallyWoundedForAllOutWarHealing())
+            {
+                return IsAllOutWarHealingDestinationOpen(destination);
+            }
+
             return match.CountNearbyDroidTargets(destination, AllOutWarHealResourceDangerRadius, health) <= 0 &&
                 match.CountDroidTargetsNearRoute(transform.position, destination, AllOutWarHealRouteDangerRadius, health) <= 0;
+        }
+
+        private bool IsAllOutWarHealingDestinationOpen(Vector3 destination)
+        {
+            return match != null &&
+                health != null &&
+                match.CountNearbyDroidTargets(destination, AllOutWarHealResourceDangerRadius, health) <= 0;
+        }
+
+        private bool IsCriticallyWoundedForAllOutWarHealing()
+        {
+            return health != null &&
+                health.MaxHealth > 0f &&
+                health.CurrentHealth / health.MaxHealth <= AllOutWarCriticalHealRatio;
         }
 
         private bool TryBeginAllOutWarSafeAmmoResupply()
@@ -1289,6 +1584,12 @@ namespace ArenaShooter
 
         private void UpdateCrouch(bool canSeePlayer)
         {
+            if (autonomousWarMode && allOutWarPerformanceTier == AllOutWarPerformanceTier.Background && !canSeePlayer)
+            {
+                crouchUntil = 0f;
+                return;
+            }
+
             if (Time.time >= nextCrouchDecisionAt)
             {
                 nextCrouchDecisionAt = Time.time + Random.Range(1.2f, 2.4f);
@@ -1340,6 +1641,11 @@ namespace ArenaShooter
                 return false;
             }
 
+            if (autonomousWarMode)
+            {
+                RegisterAllOutWarLosCheck();
+            }
+
             var hits = Physics.RaycastAll(eye, toTarget.normalized, toTarget.magnitude + 0.2f, ~0, QueryTriggerInteraction.Ignore);
             if (hits.Length == 0)
             {
@@ -1385,19 +1691,35 @@ namespace ArenaShooter
 
         private void UpdatePath(Vector3 destination, float interval)
         {
+            var tieredInterval = autonomousWarMode ? GetAllOutWarPathInterval(interval) : interval;
             if (Time.time < repathAt && (hasNavMeshPath || path.Count > 0))
             {
                 return;
             }
 
-            repathAt = Time.time + interval;
+            repathAt = Time.time + tieredInterval;
             ClearCurrentPath();
+            if (autonomousWarMode)
+            {
+                RegisterAllOutWarPathRebuild();
+            }
+
             if (autonomousWarMode && TryBuildNavMeshPath(destination))
             {
                 return;
             }
 
             path.AddRange(layout.FindPath(layout.GetNearestRoom(transform.position), layout.GetNearestRoom(destination)));
+        }
+
+        private float GetAllOutWarPathInterval(float baseInterval)
+        {
+            return allOutWarPerformanceTier switch
+            {
+                AllOutWarPerformanceTier.Background => Mathf.Max(baseInterval * 2.75f, 1.05f),
+                AllOutWarPerformanceTier.Reduced => Mathf.Max(baseInterval * 1.7f, 0.48f),
+                _ => baseInterval
+            };
         }
 
         private void MoveAlongPath(Vector3 destination, float speed, float stopDistance)
@@ -1484,21 +1806,18 @@ namespace ArenaShooter
                 return false;
             }
 
-            while (navMeshCornerIndex < navMeshCorners.Length &&
-                   FlatDistance(transform.position, navMeshCorners[navMeshCornerIndex]) < 0.82f)
+            while (navMeshCornerIndex < navMeshCorners.Length - 1 &&
+                   FlatDistance(transform.position, navMeshCorners[navMeshCornerIndex]) <= NavMeshIntermediateCornerAdvanceDistance)
             {
                 navMeshCornerIndex++;
             }
 
             targetPoint = navMeshCornerIndex < navMeshCorners.Length ? navMeshCorners[navMeshCornerIndex] : destination;
             var flatToTarget = Flatten(targetPoint - transform.position);
-            if (flatToTarget.magnitude <= stopDistance)
+            var finalLeg = navMeshCornerIndex >= navMeshCorners.Length - 1;
+            if (finalLeg && flatToTarget.magnitude <= stopDistance)
             {
-                if (navMeshCornerIndex >= navMeshCorners.Length)
-                {
-                    ClearNavMeshPath();
-                }
-
+                ClearNavMeshPath();
                 ApplyGravityOnly();
                 return true;
             }
@@ -1606,7 +1925,25 @@ namespace ArenaShooter
             repathAt = 0f;
             if (autonomousWarMode)
             {
+                if (survivalState == TacticalSurvivalState.RetreatForHeal)
+                {
+                    LogAllOutWarAiDebug("Stuck during healing retreat; releasing health runner and refreshing objective.");
+                    ClearHealingTargets();
+                    survivalState = TacticalSurvivalState.None;
+                }
+                else if (survivalState == TacticalSurvivalState.Resupply)
+                {
+                    LogAllOutWarAiDebug("Stuck during resupply; releasing ammo runner and refreshing objective.");
+                    ClearAmmoTarget();
+                    survivalState = TacticalSurvivalState.None;
+                }
+                else
+                {
+                    LogAllOutWarAiDebug("Stuck during movement; refreshing search objective.");
+                }
+
                 allOutWarForceObjectiveRefresh = true;
+                allOutWarObjectiveVersion = -1;
                 nextSearchPickAt = 0f;
             }
         }
@@ -1642,6 +1979,89 @@ namespace ArenaShooter
         private static float FlatDistance(Vector3 a, Vector3 b)
         {
             return Flatten(a - b).magnitude;
+        }
+
+        private static void RegisterAllOutWarTierFrame(AllOutWarPerformanceTier tier)
+        {
+            if (!AllOutWarPerformanceDebugLogs)
+            {
+                return;
+            }
+
+            switch (tier)
+            {
+                case AllOutWarPerformanceTier.Background:
+                    backgroundTierFrames++;
+                    break;
+                case AllOutWarPerformanceTier.Reduced:
+                    reducedTierFrames++;
+                    break;
+                default:
+                    fullTierFrames++;
+                    break;
+            }
+
+            TryLogAllOutWarPerformanceStats();
+        }
+
+        private static void RegisterAllOutWarTargetScan()
+        {
+            if (AllOutWarPerformanceDebugLogs)
+            {
+                targetScansThisSecond++;
+            }
+        }
+
+        private static void RegisterAllOutWarLosCheck()
+        {
+            if (AllOutWarPerformanceDebugLogs)
+            {
+                losChecksThisSecond++;
+            }
+        }
+
+        private static void RegisterAllOutWarPathRebuild()
+        {
+            if (AllOutWarPerformanceDebugLogs)
+            {
+                pathRebuildsThisSecond++;
+            }
+        }
+
+        private static void RegisterAllOutWarBeamVisual()
+        {
+            if (AllOutWarPerformanceDebugLogs)
+            {
+                beamVisualsThisSecond++;
+            }
+        }
+
+        private static void TryLogAllOutWarPerformanceStats()
+        {
+            if (!AllOutWarPerformanceDebugLogs || Time.time < nextPerformanceLogAt)
+            {
+                return;
+            }
+
+            nextPerformanceLogAt = Time.time + 1f;
+            Debug.Log(
+                $"[Arena Shooter] All Out War LOD frames full={fullTierFrames} reduced={reducedTierFrames} background={backgroundTierFrames} " +
+                $"targetScans={targetScansThisSecond} los={losChecksThisSecond} paths={pathRebuildsThisSecond} beams={beamVisualsThisSecond}");
+            fullTierFrames = 0;
+            reducedTierFrames = 0;
+            backgroundTierFrames = 0;
+            targetScansThisSecond = 0;
+            losChecksThisSecond = 0;
+            pathRebuildsThisSecond = 0;
+            beamVisualsThisSecond = 0;
+        }
+
+        private void LogAllOutWarAiDebug(string message)
+        {
+            if (AllOutWarAiDebugLogs)
+            {
+                Debug.Log($"[Arena Shooter] All Out War droid {name}: {message}", this);
+            }
         }
     }
 }

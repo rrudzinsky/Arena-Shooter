@@ -10,6 +10,9 @@ namespace ArenaShooter
         private const string AssetPath = "Assets/Models/CyberBattleDroid.fbx";
         private const string ResourceAssetPath = "Assets/Resources/Models/CyberBattleDroid.fbx";
         private const string ResourcePath = "Models/CyberBattleDroid";
+        private const float TargetDroidMaxDimension = 1.85f;
+        private const float MinimumVisibleBoundsDimension = 0.05f;
+        private const string DiagnosticLabel = "Battle droid imported model";
 
         public static bool TryBuild(Transform parent, ArenaTheme theme)
         {
@@ -30,14 +33,26 @@ namespace ArenaShooter
             instance.transform.localPosition = Vector3.zero;
             instance.transform.localRotation = Quaternion.identity;
             instance.transform.localScale = Vector3.one;
-            foreach (var collider in wrapper.GetComponentsInChildren<Collider>(true))
-            {
-                ImportedModelUtility.DestroyObject(collider);
-            }
 
+            ForceVisibleHierarchy(wrapper);
+            ImportedModelUtility.RemoveImportedCamerasAndLights(wrapper);
+            ImportedModelUtility.RemoveColliders(wrapper);
+            ImportedModelUtility.TryNormalizeRendererBounds(wrapper, instance.transform, TargetDroidMaxDimension, DiagnosticLabel);
             ApplyThemeMaterials(wrapper, theme);
             DroidRenderSetup.Apply(wrapper);
-            ImportedModelUtility.LogModelInstanceDiagnostics("Battle droid imported model", wrapper);
+            ImportedModelUtility.LogModelInstanceDiagnostics(DiagnosticLabel, wrapper);
+
+            if (!HasUsableVisibleRenderer(wrapper))
+            {
+                if (Application.isPlaying)
+                {
+                    Debug.LogWarning("[Arena Shooter Model Diagnostics] Imported battle droid rejected; using procedural fallback body.");
+                }
+
+                ImportedModelUtility.DestroyObject(wrapper);
+                return false;
+            }
+
             return true;
         }
 
@@ -79,6 +94,48 @@ namespace ArenaShooter
         private static Material ResolveThemeMaterial(ArenaTheme theme)
         {
             return theme.DroidArmor;
+        }
+
+        private static void ForceVisibleHierarchy(GameObject root)
+        {
+            if (root == null)
+            {
+                return;
+            }
+
+            foreach (var child in root.GetComponentsInChildren<Transform>(true))
+            {
+                child.gameObject.SetActive(true);
+            }
+
+            foreach (var renderer in root.GetComponentsInChildren<Renderer>(true))
+            {
+                renderer.enabled = true;
+            }
+        }
+
+        private static bool HasUsableVisibleRenderer(GameObject root)
+        {
+            if (root == null)
+            {
+                return false;
+            }
+
+            foreach (var renderer in root.GetComponentsInChildren<Renderer>(true))
+            {
+                if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+
+                var size = renderer.bounds.size;
+                if (Mathf.Max(size.x, size.y, size.z) >= MinimumVisibleBoundsDimension)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 }

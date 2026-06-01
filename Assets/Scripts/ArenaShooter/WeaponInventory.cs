@@ -98,7 +98,7 @@ namespace ArenaShooter
             damageMultiplier = Mathf.Max(1f, multiplier);
         }
 
-        public bool TryFire(Vector3 origin, Vector3 direction)
+        public bool TryFire(Vector3 origin, Vector3 direction, bool showPresentation = true)
         {
             if (currentWeapon == null || ammo <= 0 || Time.time < nextFireTime || owner == null || !owner.IsAlive)
             {
@@ -108,8 +108,12 @@ namespace ArenaShooter
             nextFireTime = Time.time + currentWeapon.Cooldown;
             ammo--;
             viewModel?.SetAmmo(ammo, maxAmmo);
-            viewModel?.PlayFire();
-            ArenaAudio.Instance?.PlayGunshot(transform.position);
+            if (showPresentation)
+            {
+                viewModel?.PlayFire();
+                ArenaAudio.Instance?.PlayGunshot(transform.position);
+            }
+
             ArenaNoise.EmitGunfire(origin, direction, owner, 64f);
             if (owner.GetComponent<PlayerFpsController>() != null)
             {
@@ -141,8 +145,12 @@ namespace ArenaShooter
                 }
             }
 
-            var beamStart = firePoint != null ? firePoint.position : origin;
-            StartCoroutine(ShowBeam(beamStart, endPoint));
+            if (showPresentation)
+            {
+                var beamStart = firePoint != null ? firePoint.position : origin;
+                StartCoroutine(ShowBeam(beamStart, endPoint));
+            }
+
             return true;
         }
 

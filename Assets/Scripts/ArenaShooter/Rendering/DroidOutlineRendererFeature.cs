@@ -31,6 +31,7 @@ namespace ArenaShooter.Rendering
             [Range(2f, 180f)] public float distanceFadeEnd = 70f;
             [Range(0.35f, 1f)] public float distantHardEdgeScale = 0.48f;
             [Range(0.15f, 1f)] public float distantGlowScale = 0.24f;
+            public bool useReferenceNeonStyle = true;
             public OutlineDiagnosticMode diagnosticMode = OutlineDiagnosticMode.Off;
             public int diagnosticBandIndex = -1;
             public bool diagnosticIgnoreRenderingLayerFilter;
@@ -43,6 +44,18 @@ namespace ArenaShooter.Rendering
             public bool enabled = true;
             public uint renderingLayerMask;
             public Color outlineColor;
+            [Range(0f, 4f)] public float hardEdgePixels;
+            [Range(0f, 8f)] public float glowPixels;
+            [Range(0f, 6f)] public float intensity;
+            [Range(0f, 1f)] public float glowStrength;
+            [Range(0f, 2f)] public float hardEdgeStrength;
+            [Range(-1f, 1f)] public float alphaEdgeStrength = -1f;
+            [Range(-1f, 1f)] public float normalEdgeStrength = -1f;
+            [Range(0f, 0.5f)] public float normalEdgeThreshold;
+            [Range(0f, 120f)] public float distanceFadeStart;
+            [Range(0f, 180f)] public float distanceFadeEnd;
+            [Range(0f, 1f)] public float distantHardEdgeScale;
+            [Range(0f, 1f)] public float distantGlowScale;
 
             public OutlineBand(string name, uint renderingLayerMask, Color outlineColor)
             {
@@ -52,12 +65,61 @@ namespace ArenaShooter.Rendering
             }
         }
 
+        private readonly struct ResolvedOutlineStyle
+        {
+            public readonly Color Color;
+            public readonly float HardEdgePixels;
+            public readonly float GlowPixels;
+            public readonly float Intensity;
+            public readonly float GlowStrength;
+            public readonly float HardEdgeStrength;
+            public readonly float AlphaEdgeStrength;
+            public readonly float NormalEdgeStrength;
+            public readonly float NormalEdgeThreshold;
+            public readonly float DistanceFadeStart;
+            public readonly float DistanceFadeEnd;
+            public readonly float DistantHardEdgeScale;
+            public readonly float DistantGlowScale;
+
+            public ResolvedOutlineStyle(
+                Color color,
+                float hardEdgePixels,
+                float glowPixels,
+                float intensity,
+                float glowStrength,
+                float hardEdgeStrength,
+                float alphaEdgeStrength,
+                float normalEdgeStrength,
+                float normalEdgeThreshold,
+                float distanceFadeStart,
+                float distanceFadeEnd,
+                float distantHardEdgeScale,
+                float distantGlowScale)
+            {
+                Color = color;
+                HardEdgePixels = hardEdgePixels;
+                GlowPixels = glowPixels;
+                Intensity = intensity;
+                GlowStrength = glowStrength;
+                HardEdgeStrength = hardEdgeStrength;
+                AlphaEdgeStrength = alphaEdgeStrength;
+                NormalEdgeStrength = normalEdgeStrength;
+                NormalEdgeThreshold = normalEdgeThreshold;
+                DistanceFadeStart = distanceFadeStart;
+                DistanceFadeEnd = distanceFadeEnd;
+                DistantHardEdgeScale = distantHardEdgeScale;
+                DistantGlowScale = distantGlowScale;
+            }
+        }
+
         private const string MaskShaderName = "Hidden/ArenaShooter/DroidOutlineMask";
+        private const string WallDamageMaskShaderName = "Hidden/ArenaShooter/DroidOutlineWallDamageMask";
         private const string CompositeShaderName = "Hidden/ArenaShooter/DroidOutlineComposite";
 
         public OutlineSettings settings = new OutlineSettings();
 
         private Material maskMaterial;
+        private Material wallDamageMaskMaterial;
         private Material compositeMaterial;
         private readonly List<DroidMaskPass> maskPasses = new List<DroidMaskPass>();
         private readonly List<DroidCompositePass> compositePasses = new List<DroidCompositePass>();
@@ -125,18 +187,25 @@ namespace ArenaShooter.Rendering
         public override void Create()
         {
             EnsureDefaultBands();
+            NormalizeOutlineBandStyles();
             var maskShader = Shader.Find(MaskShaderName);
+            var wallDamageMaskShader = Shader.Find(WallDamageMaskShaderName);
             var compositeShader = Shader.Find(CompositeShaderName);
             maskMaterial = maskShader != null ? CoreUtils.CreateEngineMaterial(maskShader) : null;
+            wallDamageMaskMaterial = wallDamageMaskShader != null ? CoreUtils.CreateEngineMaterial(wallDamageMaskShader) : null;
             compositeMaterial = compositeShader != null ? CoreUtils.CreateEngineMaterial(compositeShader) : null;
-            LogCreateDiagnostics(maskShader, compositeShader);
+            LogCreateDiagnostics(maskShader, wallDamageMaskShader, compositeShader);
 
             maskPasses.Clear();
             compositePasses.Clear();
             for (var i = 0; i < settings.outlineBands.Length; i++)
             {
                 var band = settings.outlineBands[i];
-                var maskPass = new DroidMaskPass(settings, band, i, maskMaterial)
+                var maskPass = new DroidMaskPass(
+                    settings,
+                    band,
+                    i,
+                    ResolveMaskMaterial(band))
                 {
                     renderPassEvent = RenderPassEvent.AfterRenderingOpaques
                 };
@@ -149,11 +218,23 @@ namespace ArenaShooter.Rendering
             }
         }
 
+        private Material ResolveMaskMaterial(OutlineBand band)
+        {
+            if (band != null &&
+                band.renderingLayerMask == DroidRenderSetup.WallRenderingLayer &&
+                wallDamageMaskMaterial != null)
+            {
+                return wallDamageMaskMaterial;
+            }
+
+            return maskMaterial;
+        }
+
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
             LogAddPassDiagnostics(renderer, ref renderingData);
 
-            if (maskMaterial == null || compositeMaterial == null ||
+            if (compositeMaterial == null ||
                 renderingData.cameraData.renderType != CameraRenderType.Base)
             {
                 return;
@@ -162,7 +243,7 @@ namespace ArenaShooter.Rendering
             for (var i = 0; i < maskPasses.Count; i++)
             {
                 var band = settings.outlineBands[i];
-                if (!band.enabled || band.renderingLayerMask == 0)
+                if (!band.enabled || band.renderingLayerMask == 0 || !maskPasses[i].HasMaterial)
                 {
                     continue;
                 }
@@ -178,7 +259,7 @@ namespace ArenaShooter.Rendering
             }
         }
 
-        private void LogCreateDiagnostics(Shader maskShader, Shader compositeShader)
+        private void LogCreateDiagnostics(Shader maskShader, Shader wallDamageMaskShader, Shader compositeShader)
         {
             if (!Application.isPlaying || createDiagnosticLogged)
             {
@@ -189,6 +270,7 @@ namespace ArenaShooter.Rendering
             Debug.Log(
                 "[Arena Shooter Outline Diagnostics] Feature Create: " +
                 $"maskShader={(maskShader != null ? "found" : "MISSING")} " +
+                $"wallDamageMaskShader={(wallDamageMaskShader != null ? "found" : "MISSING")} " +
                 $"compositeShader={(compositeShader != null ? "found" : "MISSING")} " +
                 $"bands={(settings?.outlineBands != null ? settings.outlineBands.Length : 0)} " +
                 $"pipeline={(GraphicsSettings.currentRenderPipeline != null ? GraphicsSettings.currentRenderPipeline.name : "built-in/null")}.");
@@ -232,6 +314,7 @@ namespace ArenaShooter.Rendering
                 $"cameraTarget={renderingData.cameraData.targetTexture?.name ?? "backbuffer"} " +
                 $"renderer={(renderer != null ? renderer.GetType().Name : "null")} " +
                 $"maskMaterial={(maskMaterial != null ? "ok" : "null")} " +
+                $"wallDamageMaskMaterial={(wallDamageMaskMaterial != null ? "ok" : "null")} " +
                 $"compositeMaterial={(compositeMaterial != null ? "ok" : "null")} " +
                 $"passPlan={BuildPassPlan()} " +
                 $"diagnosticMode={settings.diagnosticMode} " +
@@ -316,6 +399,12 @@ namespace ArenaShooter.Rendering
                 return;
             }
 
+            if (!force && CountCategorizedRenderers(settings.outlineBands, renderers) == 0)
+            {
+                LogRendererCategorySummary(label + " empty-pre-match", settings.outlineBands, renderers);
+                return;
+            }
+
             rendererSummaryWithObjectsLogged = true;
             LogRendererCategorySummary(label, settings.outlineBands, renderers);
         }
@@ -344,6 +433,34 @@ namespace ArenaShooter.Rendering
             }
 
             Debug.Log("[Arena Shooter Outline Diagnostics] Renderer renderingLayerMask counts (" + label + "): " + summary + ".");
+        }
+
+        private static int CountCategorizedRenderers(OutlineBand[] bands, Renderer[] renderers)
+        {
+            if (bands == null || renderers == null)
+            {
+                return 0;
+            }
+
+            var count = 0;
+            foreach (var renderer in renderers)
+            {
+                if (renderer == null)
+                {
+                    continue;
+                }
+
+                foreach (var band in bands)
+                {
+                    if (band != null && (renderer.renderingLayerMask & band.renderingLayerMask) != 0)
+                    {
+                        count++;
+                        break;
+                    }
+                }
+            }
+
+            return count;
         }
 
         private void TryLogDetailedRendererDiagnostics(Camera camera, string label)
@@ -440,6 +557,7 @@ namespace ArenaShooter.Rendering
             }
 
             CoreUtils.Destroy(maskMaterial);
+            CoreUtils.Destroy(wallDamageMaskMaterial);
             CoreUtils.Destroy(compositeMaterial);
         }
 
@@ -447,12 +565,32 @@ namespace ArenaShooter.Rendering
         {
             return new[]
             {
-                new OutlineBand("Floor Purple", DroidRenderSetup.FloorRenderingLayer, DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Floor)),
-                new OutlineBand("Wall Blue", DroidRenderSetup.WallRenderingLayer, DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Wall)),
-                new OutlineBand("Droid Gold", DroidRenderSetup.DroidRenderingLayer, DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Droid)),
-                new OutlineBand("Medical Red", DroidRenderSetup.MedicalRenderingLayer, DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Medical)),
-                new OutlineBand("Ammo Yellow", DroidRenderSetup.AmmoRenderingLayer, DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Ammo)),
-                new OutlineBand("Gun Cyan", DroidRenderSetup.GunRenderingLayer, DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Gun))
+                CreateDefaultBand("Floor Violet", DroidRenderSetup.FloorRenderingLayer),
+                CreateDefaultBand("Wall Green Teal", DroidRenderSetup.WallRenderingLayer),
+                CreateDefaultBand("Droid Amber", DroidRenderSetup.DroidRenderingLayer),
+                CreateDefaultBand("Medical Rose", DroidRenderSetup.MedicalRenderingLayer),
+                CreateDefaultBand("Ammo Gold", DroidRenderSetup.AmmoRenderingLayer),
+                CreateDefaultBand("Gun Cyan", DroidRenderSetup.GunRenderingLayer)
+            };
+        }
+
+        private static OutlineBand CreateDefaultBand(string name, uint renderingLayerMask)
+        {
+            var style = CreateReferenceStyle(renderingLayerMask, null);
+            return new OutlineBand(name, renderingLayerMask, style.Color)
+            {
+                hardEdgePixels = style.HardEdgePixels,
+                glowPixels = style.GlowPixels,
+                intensity = style.Intensity,
+                glowStrength = style.GlowStrength,
+                hardEdgeStrength = style.HardEdgeStrength,
+                alphaEdgeStrength = style.AlphaEdgeStrength,
+                normalEdgeStrength = style.NormalEdgeStrength,
+                normalEdgeThreshold = style.NormalEdgeThreshold,
+                distanceFadeStart = style.DistanceFadeStart,
+                distanceFadeEnd = style.DistanceFadeEnd,
+                distantHardEdgeScale = style.DistantHardEdgeScale,
+                distantGlowScale = style.DistantGlowScale
             };
         }
 
@@ -469,19 +607,291 @@ namespace ArenaShooter.Rendering
             }
         }
 
-        private static Vector4 CreateDistanceParams(OutlineSettings settings)
+        private void NormalizeOutlineBandStyles()
         {
-            var start = Mathf.Max(0.01f, settings != null ? settings.distanceFadeStart : 24f);
-            var end = Mathf.Max(start + 0.01f, settings != null ? settings.distanceFadeEnd : 70f);
+            if (settings?.outlineBands == null)
+            {
+                return;
+            }
+
+            if (!settings.useReferenceNeonStyle && UsesLegacyHotNeonColors(settings.outlineBands))
+            {
+                settings.useReferenceNeonStyle = true;
+            }
+
+            for (var i = 0; i < settings.outlineBands.Length; i++)
+            {
+                var band = settings.outlineBands[i];
+                if (band == null)
+                {
+                    continue;
+                }
+
+                var style = ResolveOutlineStyle(settings, band);
+                if (settings.useReferenceNeonStyle)
+                {
+                    band.outlineColor = style.Color;
+                }
+
+                if (band.hardEdgePixels <= 0f)
+                {
+                    band.hardEdgePixels = style.HardEdgePixels;
+                }
+
+                if (band.glowPixels <= 0f)
+                {
+                    band.glowPixels = style.GlowPixels;
+                }
+
+                if (band.intensity <= 0f)
+                {
+                    band.intensity = style.Intensity;
+                }
+
+                if (band.glowStrength <= 0f)
+                {
+                    band.glowStrength = style.GlowStrength;
+                }
+
+                if (band.hardEdgeStrength <= 0f)
+                {
+                    band.hardEdgeStrength = style.HardEdgeStrength;
+                }
+
+                if (band.alphaEdgeStrength < 0f)
+                {
+                    band.alphaEdgeStrength = style.AlphaEdgeStrength;
+                }
+
+                if (band.normalEdgeStrength < 0f)
+                {
+                    band.normalEdgeStrength = style.NormalEdgeStrength;
+                }
+
+                if (band.normalEdgeThreshold <= 0f)
+                {
+                    band.normalEdgeThreshold = style.NormalEdgeThreshold;
+                }
+
+                if (band.distanceFadeStart <= 0f)
+                {
+                    band.distanceFadeStart = style.DistanceFadeStart;
+                }
+
+                if (band.distanceFadeEnd <= 0f)
+                {
+                    band.distanceFadeEnd = style.DistanceFadeEnd;
+                }
+
+                if (band.distantHardEdgeScale <= 0f)
+                {
+                    band.distantHardEdgeScale = style.DistantHardEdgeScale;
+                }
+
+                if (band.distantGlowScale <= 0f)
+                {
+                    band.distantGlowScale = style.DistantGlowScale;
+                }
+            }
+        }
+
+        private static bool UsesLegacyHotNeonColors(OutlineBand[] bands)
+        {
+            if (bands == null)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < bands.Length; i++)
+            {
+                var band = bands[i];
+                if (band != null && band.outlineColor.maxColorComponent > 3f)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static ResolvedOutlineStyle ResolveOutlineStyle(OutlineSettings settings, OutlineBand band)
+        {
+            var reference = CreateReferenceStyle(band != null ? band.renderingLayerMask : 0u, settings);
+            if (settings == null || settings.useReferenceNeonStyle)
+            {
+                return reference;
+            }
+
+            var color = band != null && band.outlineColor.maxColorComponent > 0.001f
+                ? band.outlineColor
+                : reference.Color;
+
+            return new ResolvedOutlineStyle(
+                color,
+                band != null && band.hardEdgePixels > 0f ? band.hardEdgePixels : reference.HardEdgePixels,
+                band != null && band.glowPixels > 0f ? band.glowPixels : reference.GlowPixels,
+                band != null && band.intensity > 0f ? band.intensity : reference.Intensity,
+                band != null && band.glowStrength > 0f ? band.glowStrength : reference.GlowStrength,
+                band != null && band.hardEdgeStrength > 0f ? band.hardEdgeStrength : reference.HardEdgeStrength,
+                band != null && band.alphaEdgeStrength >= 0f ? band.alphaEdgeStrength : reference.AlphaEdgeStrength,
+                band != null && band.normalEdgeStrength >= 0f ? band.normalEdgeStrength : reference.NormalEdgeStrength,
+                band != null && band.normalEdgeThreshold > 0f ? band.normalEdgeThreshold : reference.NormalEdgeThreshold,
+                band != null && band.distanceFadeStart > 0f ? band.distanceFadeStart : reference.DistanceFadeStart,
+                band != null && band.distanceFadeEnd > 0f ? band.distanceFadeEnd : reference.DistanceFadeEnd,
+                band != null && band.distantHardEdgeScale > 0f ? band.distantHardEdgeScale : reference.DistantHardEdgeScale,
+                band != null && band.distantGlowScale > 0f ? band.distantGlowScale : reference.DistantGlowScale);
+        }
+
+        private static ResolvedOutlineStyle CreateReferenceStyle(uint renderingLayerMask, OutlineSettings settings)
+        {
+            var hard = settings != null ? Mathf.Max(1f, settings.thicknessPixels) : 1.25f;
+            var glow = settings != null ? Mathf.Max(1f, settings.glowPixels) : 2.2f;
+            var normalThreshold = settings != null ? Mathf.Max(0.01f, settings.normalEdgeThreshold) : 0.14f;
+            var fadeStart = settings != null ? Mathf.Max(1f, settings.distanceFadeStart) : 24f;
+            var fadeEnd = settings != null ? Mathf.Max(fadeStart + 1f, settings.distanceFadeEnd) : 76f;
+            var distantHard = settings != null ? Mathf.Clamp(settings.distantHardEdgeScale, 0.35f, 1f) : 0.58f;
+            var distantGlow = settings != null ? Mathf.Clamp(settings.distantGlowScale, 0.15f, 1f) : 0.22f;
+
+            if (renderingLayerMask == DroidRenderSetup.WallRenderingLayer)
+            {
+                return new ResolvedOutlineStyle(
+                    DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Wall),
+                    0.85f,
+                    1.0f,
+                    0.72f,
+                    0.0f,
+                    0.85f,
+                    0.85f,
+                    0.45f,
+                    0.18f,
+                    fadeStart,
+                    fadeEnd,
+                    0.72f,
+                    0.0f);
+            }
+
+            if (renderingLayerMask == DroidRenderSetup.FloorRenderingLayer)
+            {
+                return new ResolvedOutlineStyle(
+                    DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Floor),
+                    1.0f,
+                    2.0f,
+                    0.62f,
+                    0.14f,
+                    0.92f,
+                    1.0f,
+                    0.03f,
+                    0.18f,
+                    fadeStart,
+                    fadeEnd,
+                    0.58f,
+                    0.16f);
+            }
+
+            if (renderingLayerMask == DroidRenderSetup.DroidRenderingLayer)
+            {
+                return new ResolvedOutlineStyle(
+                    DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Droid),
+                    1.25f,
+                    2.25f,
+                    0.78f,
+                    0.22f,
+                    1.0f,
+                    1.0f,
+                    0.28f,
+                    0.14f,
+                    fadeStart,
+                    fadeEnd,
+                    0.52f,
+                    0.20f);
+            }
+
+            if (renderingLayerMask == DroidRenderSetup.MedicalRenderingLayer)
+            {
+                return new ResolvedOutlineStyle(
+                    DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Medical),
+                    1.2f,
+                    2.25f,
+                    0.82f,
+                    0.22f,
+                    1.0f,
+                    1.0f,
+                    0.16f,
+                    0.15f,
+                    fadeStart,
+                    fadeEnd,
+                    0.52f,
+                    0.20f);
+            }
+
+            if (renderingLayerMask == DroidRenderSetup.AmmoRenderingLayer)
+            {
+                return new ResolvedOutlineStyle(
+                    DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Ammo),
+                    1.2f,
+                    2.25f,
+                    0.78f,
+                    0.22f,
+                    1.0f,
+                    1.0f,
+                    0.16f,
+                    0.15f,
+                    fadeStart,
+                    fadeEnd,
+                    0.52f,
+                    0.20f);
+            }
+
+            if (renderingLayerMask == DroidRenderSetup.GunRenderingLayer)
+            {
+                return new ResolvedOutlineStyle(
+                    DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Gun),
+                    0.75f,
+                    1.25f,
+                    0.96f,
+                    0.16f,
+                    0.98f,
+                    1.0f,
+                    0.12f,
+                    0.13f,
+                    fadeStart,
+                    fadeEnd,
+                    0.50f,
+                    0.16f);
+            }
+
+            return new ResolvedOutlineStyle(
+                Color.white,
+                hard,
+                glow,
+                settings != null ? Mathf.Max(0.1f, settings.intensity) : DroidRenderSetup.DefaultOutlineIntensity,
+                0.22f,
+                1.0f,
+                1.0f,
+                0.12f,
+                normalThreshold,
+                fadeStart,
+                fadeEnd,
+                distantHard,
+                distantGlow);
+        }
+
+        private static Vector4 CreateDistanceParams(OutlineSettings settings, OutlineBand band)
+        {
+            var style = ResolveOutlineStyle(settings, band);
+            var start = Mathf.Max(0.01f, style.DistanceFadeStart);
+            var end = Mathf.Max(start + 0.01f, style.DistanceFadeEnd);
             var inverseRange = 1f / (end - start);
-            var hardScale = Mathf.Clamp(settings != null ? settings.distantHardEdgeScale : 0.48f, 0.35f, 1f);
-            var glowScale = Mathf.Clamp(settings != null ? settings.distantGlowScale : 0.24f, 0.15f, 1f);
+            var hardScale = Mathf.Clamp(style.DistantHardEdgeScale, 0.35f, 1f);
+            var glowScale = Mathf.Clamp(style.DistantGlowScale, 0.15f, 1f);
             return new Vector4(start, inverseRange, hardScale, glowScale);
         }
 
         private sealed class DroidMaskPass : ScriptableRenderPass
         {
             private static readonly int OutlineDistanceParamsId = Shader.PropertyToID("_OutlineDistanceParams");
+            private static readonly int WallDamageClipEnabledId = Shader.PropertyToID("_WallDamageClipEnabled");
+            private static readonly int WallDamageStampCountId = Shader.PropertyToID("_WallDamageStampCount");
             private static readonly HashSet<string> LoggedExecuteBands = new HashSet<string>();
             private static readonly HashSet<string> LoggedRenderGraphBands = new HashSet<string>();
             private static readonly HashSet<string> LoggedRenderFuncBands = new HashSet<string>();
@@ -502,8 +912,13 @@ namespace ArenaShooter.Rendering
             private RTHandle maskTexture;
 
             public RTHandle MaskTexture => maskTexture;
+            public bool HasMaterial => material != null;
 
-            public DroidMaskPass(OutlineSettings settings, OutlineBand band, int bandIndex, Material material)
+            public DroidMaskPass(
+                OutlineSettings settings,
+                OutlineBand band,
+                int bandIndex,
+                Material material)
             {
                 this.settings = settings;
                 this.band = band;
@@ -519,7 +934,7 @@ namespace ArenaShooter.Rendering
                 var descriptor = renderingData.cameraData.cameraTargetDescriptor;
                 descriptor.depthBufferBits = 0;
                 descriptor.msaaSamples = 1;
-                descriptor.graphicsFormat = GraphicsFormat.R8G8B8A8_UNorm;
+                descriptor.graphicsFormat = GetMaskGraphicsFormat();
 
                 RenderingUtils.ReAllocateIfNeeded(
                     ref maskTexture,
@@ -542,7 +957,7 @@ namespace ArenaShooter.Rendering
                 LogExecuteDiagnostic(renderingData.cameraData.camera);
 
                 var cameraData = renderingData.cameraData;
-                var filteringSettings = CreateFilteringSettings(band);
+                var filteringSettings = CreateFilteringSettings(band.renderingLayerMask);
                 var drawingSettings = RenderingUtils.CreateDrawingSettings(ShaderTagIds, ref renderingData, cameraData.defaultOpaqueSortFlags);
                 drawingSettings.overrideMaterial = material;
                 drawingSettings.perObjectData = PerObjectData.None;
@@ -551,7 +966,9 @@ namespace ArenaShooter.Rendering
                 var cmd = CommandBufferPool.Get();
                 using (new ProfilingScope(cmd, sampler))
                 {
-                    material.SetVector(OutlineDistanceParamsId, CreateDistanceParams(settings));
+                    var distanceParams = CreateDistanceParams(settings, band);
+                    material.SetVector(OutlineDistanceParamsId, distanceParams);
+                    ResetWallDamageClipGlobals(cmd);
                     context.ExecuteCommandBuffer(cmd);
                     cmd.Clear();
                     context.DrawRenderers(renderingData.cullResults, ref drawingSettings, ref filteringSettings);
@@ -579,7 +996,7 @@ namespace ArenaShooter.Rendering
                 var descriptor = cameraData.cameraTargetDescriptor;
                 descriptor.depthBufferBits = 0;
                 descriptor.msaaSamples = 1;
-                descriptor.graphicsFormat = GraphicsFormat.R8G8B8A8_UNorm;
+                descriptor.graphicsFormat = GetMaskGraphicsFormat();
 
                 var destination = UniversalRenderer.CreateRenderGraphTexture(
                     renderGraph,
@@ -600,7 +1017,7 @@ namespace ArenaShooter.Rendering
                     passData.bandName = band.name;
                     passData.bandIndex = bandIndex;
                     passData.renderingLayerMask = band.renderingLayerMask;
-                    passData.distanceParams = CreateDistanceParams(settings);
+                    passData.distanceParams = CreateDistanceParams(settings, band);
                     var drawSettings = RenderingUtils.CreateDrawingSettings(
                         ShaderTagIds,
                         renderingData,
@@ -613,13 +1030,15 @@ namespace ArenaShooter.Rendering
 
                     var ignoredRenderingLayerFilter = settings.diagnosticMode != OutlineDiagnosticMode.Off &&
                         settings.diagnosticIgnoreRenderingLayerFilter;
-                    var filteringSettings = CreateFilteringSettings(band, ignoredRenderingLayerFilter);
+                    var filteringSettings = CreateFilteringSettings(band.renderingLayerMask, ignoredRenderingLayerFilter);
                     var rendererListParams = new RendererListParams(renderingData.cullResults, drawSettings, filteringSettings);
                     rendererListParams.filteringSettings.batchLayerMask = uint.MaxValue;
 
                     passData.rendererList = renderGraph.CreateRendererList(rendererListParams);
+
                     passData.ignoredRenderingLayerFilter = ignoredRenderingLayerFilter;
                     builder.UseRendererList(passData.rendererList);
+
                     builder.SetRenderAttachment(destination, 0, AccessFlags.WriteAll);
                     builder.SetRenderAttachmentDepth(resourceData.activeDepthTexture, AccessFlags.Read);
                     builder.AllowGlobalStateModification(true);
@@ -628,6 +1047,7 @@ namespace ArenaShooter.Rendering
                     {
                         LogRenderFuncDiagnostic(data.cameraName, data.bandName, data.renderingLayerMask, data.ignoredRenderingLayerFilter);
                         context.cmd.SetGlobalVector(OutlineDistanceParamsId, data.distanceParams);
+                        ResetWallDamageClipGlobals(context.cmd);
                         context.cmd.ClearRenderTarget(false, true, Color.clear);
                         context.cmd.DrawRendererList(data.rendererList);
                     });
@@ -657,11 +1077,28 @@ namespace ArenaShooter.Rendering
                 public int height;
             }
 
-            private static FilteringSettings CreateFilteringSettings(OutlineBand band, bool ignoreRenderingLayerFilter = false)
+            private GraphicsFormat GetMaskGraphicsFormat()
+            {
+                return GraphicsFormat.R8G8B8A8_UNorm;
+            }
+
+            private static FilteringSettings CreateFilteringSettings(uint renderingLayerMask, bool ignoreRenderingLayerFilter = false)
             {
                 var filteringSettings = new FilteringSettings(RenderQueueRange.opaque, -1);
-                filteringSettings.renderingLayerMask = ignoreRenderingLayerFilter ? uint.MaxValue : band.renderingLayerMask;
+                filteringSettings.renderingLayerMask = ignoreRenderingLayerFilter ? uint.MaxValue : renderingLayerMask;
                 return filteringSettings;
+            }
+
+            private static void ResetWallDamageClipGlobals(CommandBuffer cmd)
+            {
+                cmd.SetGlobalInt(WallDamageClipEnabledId, 0);
+                cmd.SetGlobalInt(WallDamageStampCountId, 0);
+            }
+
+            private static void ResetWallDamageClipGlobals(RasterCommandBuffer cmd)
+            {
+                cmd.SetGlobalInt(WallDamageClipEnabledId, 0);
+                cmd.SetGlobalInt(WallDamageStampCountId, 0);
             }
 
             public void Dispose()
@@ -719,7 +1156,17 @@ namespace ArenaShooter.Rendering
             {
                 var cameraName = camera != null ? camera.name : "null";
                 var key = cameraName + "|" + band.name;
-                if (!Application.isPlaying || !RequestedMaskReadbacks.Add(key) || !mask.IsValid() || width <= 0 || height <= 0)
+                if (!Application.isPlaying || !mask.IsValid() || width <= 0 || height <= 0)
+                {
+                    return;
+                }
+
+                if (!HasActiveRendererForBand())
+                {
+                    return;
+                }
+
+                if (!RequestedMaskReadbacks.Add(key))
                 {
                     return;
                 }
@@ -746,6 +1193,23 @@ namespace ArenaShooter.Rendering
                             request => LogMaskReadbackResult(request, data));
                     });
                 }
+            }
+
+            private bool HasActiveRendererForBand()
+            {
+                var renderers = Object.FindObjectsByType<Renderer>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+                foreach (var renderer in renderers)
+                {
+                    if (renderer != null &&
+                        renderer.enabled &&
+                        renderer.gameObject.activeInHierarchy &&
+                        (renderer.renderingLayerMask & band.renderingLayerMask) != 0)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
             }
 
             private static void LogMaskReadbackResult(AsyncGPUReadbackRequest request, MaskReadbackPassData data)
@@ -851,6 +1315,7 @@ namespace ArenaShooter.Rendering
             private static readonly int MaskTexelSizeId = Shader.PropertyToID("_DroidOutlineMaskTexelSize");
             private static readonly int OutlineColorId = Shader.PropertyToID("_OutlineColor");
             private static readonly int OutlineParamsId = Shader.PropertyToID("_OutlineParams");
+            private static readonly int OutlineStyleParamsId = Shader.PropertyToID("_OutlineStyleParams");
             private static readonly int OutlineDistanceParamsId = Shader.PropertyToID("_OutlineDistanceParams");
             private static readonly int DiagnosticModeId = Shader.PropertyToID("_DiagnosticMode");
             private static readonly int ApplyMatteSceneId = Shader.PropertyToID("_ApplyMatteScene");
@@ -907,19 +1372,27 @@ namespace ArenaShooter.Rendering
                 using (new ProfilingScope(cmd, sampler))
                 {
                     var maskRt = maskTexture.rt;
+                    var style = ResolveOutlineStyle(settings, band);
                     material.SetTexture(MaskTextureId, maskTexture);
                     material.SetVector(MaskTexelSizeId, new Vector4(1f / maskRt.width, 1f / maskRt.height, maskRt.width, maskRt.height));
-                    material.SetColor(OutlineColorId, band.outlineColor);
+                    material.SetColor(OutlineColorId, style.Color);
                     material.SetInt(DiagnosticModeId, (int)settings.diagnosticMode);
                     material.SetInt(ApplyMatteSceneId, IsFirstEnabledBand() ? 1 : 0);
                     material.SetVector(
                         OutlineParamsId,
                         new Vector4(
-                            Mathf.Max(1, settings.thicknessPixels),
-                            Mathf.Max(1, settings.glowPixels),
-                            Mathf.Max(0.01f, settings.normalEdgeThreshold),
-                            Mathf.Max(0.1f, settings.intensity)));
-                    material.SetVector(OutlineDistanceParamsId, CreateDistanceParams(settings));
+                            Mathf.Max(0.25f, style.HardEdgePixels),
+                            Mathf.Max(0.25f, style.GlowPixels),
+                            Mathf.Max(0.01f, style.NormalEdgeThreshold),
+                            Mathf.Max(0.1f, style.Intensity)));
+                    material.SetVector(
+                        OutlineStyleParamsId,
+                        new Vector4(
+                            Mathf.Clamp01(style.NormalEdgeStrength),
+                            Mathf.Clamp01(style.GlowStrength),
+                            Mathf.Max(0f, style.HardEdgeStrength),
+                            Mathf.Clamp01(style.AlphaEdgeStrength)));
+                    material.SetVector(OutlineDistanceParamsId, CreateDistanceParams(settings, band));
 
                     Blitter.BlitCameraTexture(cmd, cameraColor, copyTexture);
                     Blitter.BlitCameraTexture(cmd, copyTexture, cameraColor, material, 0);
@@ -981,18 +1454,29 @@ namespace ArenaShooter.Rendering
                     passData.sourceValid = sourceCopy.IsValid();
                     passData.maskValid = mask.IsValid();
                     passData.maskTexelSize = new Vector4(1f / maskInfo.width, 1f / maskInfo.height, maskInfo.width, maskInfo.height);
-                    passData.outlineColor = band.outlineColor;
+                    var style = ResolveOutlineStyle(settings, band);
+                    passData.outlineColor = style.Color;
                     passData.diagnosticMode = (int)settings.diagnosticMode;
                     passData.applyMatteScene = IsFirstEnabledBand() ? 1 : 0;
                     passData.outlineParams = new Vector4(
-                        Mathf.Max(1, settings.thicknessPixels),
-                        Mathf.Max(1, settings.glowPixels),
-                        Mathf.Max(0.01f, settings.normalEdgeThreshold),
-                        Mathf.Max(0.1f, settings.intensity));
-                    passData.distanceParams = CreateDistanceParams(settings);
+                        Mathf.Max(0.25f, style.HardEdgePixels),
+                        Mathf.Max(0.25f, style.GlowPixels),
+                        Mathf.Max(0.01f, style.NormalEdgeThreshold),
+                        Mathf.Max(0.1f, style.Intensity));
+                    passData.styleParams = new Vector4(
+                        Mathf.Clamp01(style.NormalEdgeStrength),
+                        Mathf.Clamp01(style.GlowStrength),
+                        Mathf.Max(0f, style.HardEdgeStrength),
+                        Mathf.Clamp01(style.AlphaEdgeStrength));
+                    passData.distanceParams = CreateDistanceParams(settings, band);
 
                     builder.UseTexture(sourceCopy, AccessFlags.Read);
                     builder.UseTexture(mask, AccessFlags.Read);
+                    if (resourceData.cameraDepthTexture.IsValid())
+                    {
+                        builder.UseTexture(resourceData.cameraDepthTexture, AccessFlags.Read);
+                    }
+
                     builder.SetRenderAttachment(destination, 0, AccessFlags.WriteAll);
                     builder.AllowGlobalStateModification(true);
                     builder.AllowPassCulling(false);
@@ -1005,6 +1489,7 @@ namespace ArenaShooter.Rendering
                         context.cmd.SetGlobalInt(DiagnosticModeId, data.diagnosticMode);
                         context.cmd.SetGlobalInt(ApplyMatteSceneId, data.applyMatteScene);
                         context.cmd.SetGlobalVector(OutlineParamsId, data.outlineParams);
+                        context.cmd.SetGlobalVector(OutlineStyleParamsId, data.styleParams);
                         context.cmd.SetGlobalVector(OutlineDistanceParamsId, data.distanceParams);
                         Blitter.BlitTexture(context.cmd, data.source, new Vector4(1f, 1f, 0f, 0f), data.material, 0);
                     });
@@ -1023,6 +1508,7 @@ namespace ArenaShooter.Rendering
                 public Vector4 maskTexelSize;
                 public Color outlineColor;
                 public Vector4 outlineParams;
+                public Vector4 styleParams;
                 public Vector4 distanceParams;
                 public int diagnosticMode;
                 public int applyMatteScene;

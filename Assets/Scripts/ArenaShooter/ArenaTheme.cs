@@ -32,9 +32,9 @@ namespace ArenaShooter
             Ceiling = CreateLit("Synthwave Matte Black Ceiling", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             GateInterior = CreateUnlit("Gate Interior Matte Black Floor", new Color(0.002f, 0.0015f, 0.006f));
             GateEndWall = CreateLit("Spawn Corridor Matte Black Rear Wall", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
-            FloorGrid = CreateUnlit("Neon Hot Pink Floor Grid", new Color(4.2f, 0.04f, 3.1f), new Color(4.2f, 0.04f, 3.1f));
-            NeonA = CreateUnlit("Hot Pink Neon", new Color(4.0f, 0.035f, 2.85f), new Color(4.0f, 0.035f, 2.85f));
-            NeonB = CreateUnlit("Deep Magenta Neon", new Color(2.7f, 0.025f, 3.7f), new Color(2.7f, 0.025f, 3.7f));
+            FloorGrid = CreateUnlit("Clean Violet Floor Line", new Color(0.72f, 0.16f, 1.25f), new Color(0.72f, 0.16f, 1.25f));
+            NeonA = CreateUnlit("Clean Cyan Neon", new Color(0.08f, 1.32f, 1.72f), new Color(0.08f, 1.32f, 1.72f));
+            NeonB = CreateUnlit("Clean Magenta Neon", new Color(1.28f, 0.16f, 1.36f), new Color(1.28f, 0.16f, 1.36f));
             Player = CreateLit("Player Matte Black Suit", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             Opponent = CreateLit("Opponent Matte Black Suit", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             DroidArmor = CreateLit("Synthwave Droid Matte Black Body", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
@@ -44,7 +44,7 @@ namespace ArenaShooter
             Scrap = CreateLit("Gold Hot Scrap Metal", new Color(0.9f, 0.60f, 0.22f), new Color(1.6f, 0.72f, 0.08f), 0.9f, 0.28f);
             Health = CreateLit("Medical Matte Black Body", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             MedicalWhite = CreateLit("Medical Matte Black Armor", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
-            Beam = CreateLit("Weapon Beam", new Color(0.6f, 0.95f, 1f), new Color(0f, 4f, 5f));
+            Beam = CreateLit("Weapon Beam", new Color(0.32f, 0.95f, 1f), new Color(0.05f, 2.2f, 2.7f));
         }
 
         private static Material CreateUnlit(string name, Color baseColor, Color emission = default)

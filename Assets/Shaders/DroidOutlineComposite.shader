@@ -22,6 +22,7 @@ Shader "Hidden/ArenaShooter/DroidOutlineComposite"
             float4 _DroidOutlineMaskTexelSize;
             float4 _OutlineColor;
             float4 _OutlineParams;
+            float4 _OutlineStyleParams;
             float4 _OutlineDistanceParams;
             int _DiagnosticMode;
             int _ApplyMatteScene;
@@ -36,7 +37,7 @@ Shader "Hidden/ArenaShooter/DroidOutlineComposite"
                 return saturate((maskAlpha - 0.25h) / 0.75h);
             }
 
-            half DistanceScaledEdge(float2 uv, float2 offset, half minRadiusScale, half minIntensity)
+            half2 DistanceScaledEdge(float2 uv, float2 offset, half minRadiusScale, half minIntensity)
             {
                 half4 center = SAMPLE_TEXTURE2D_X(_DroidOutlineMaskTex, sampler_PointClamp, uv);
                 half4 radiusProbe = SAMPLE_TEXTURE2D_X(_DroidOutlineMaskTex, sampler_PointClamp, uv + offset);
@@ -50,16 +51,17 @@ Shader "Hidden/ArenaShooter/DroidOutlineComposite"
 
                 half3 centerNormal = center.rgb * 2.0h - 1.0h;
                 half3 sampleNormal = sampleValue.rgb * 2.0h - 1.0h;
-                half normalEdge = step((half)_OutlineParams.z, distance(centerNormal, sampleNormal)) * centerOccupancy * sampleOccupancy;
+                half normalEdge = step((half)_OutlineParams.z, distance(centerNormal, sampleNormal)) *
+                    centerOccupancy * sampleOccupancy;
                 half edgeWeight = lerp(minIntensity, 1.0h, max(DistanceWeight(center.a), DistanceWeight(sampleValue.a)));
 
-                return saturate(alphaEdge + normalEdge) * edgeWeight;
+                return half2(alphaEdge, normalEdge) * edgeWeight;
             }
 
-            half EdgeAtRadius(float2 uv, float radius, half minRadiusScale, half minIntensity)
+            half2 EdgeAtRadius(float2 uv, float radius, half minRadiusScale, half minIntensity)
             {
                 float2 texel = _DroidOutlineMaskTexelSize.xy * radius;
-                half edge = 0.0h;
+                half2 edge = half2(0.0h, 0.0h);
                 edge = max(edge, DistanceScaledEdge(uv, float2(texel.x, 0.0), minRadiusScale, minIntensity));
                 edge = max(edge, DistanceScaledEdge(uv, float2(-texel.x, 0.0), minRadiusScale, minIntensity));
                 edge = max(edge, DistanceScaledEdge(uv, float2(0.0, texel.y), minRadiusScale, minIntensity));
@@ -77,11 +79,17 @@ Shader "Hidden/ArenaShooter/DroidOutlineComposite"
                 float2 uv = input.texcoord.xy;
                 half4 sceneColor = SAMPLE_TEXTURE2D_X_LOD(_BlitTexture, sampler_LinearClamp, uv, _BlitMipLevel);
 
-                half hardEdge = EdgeAtRadius(uv, _OutlineParams.x, (half)_OutlineDistanceParams.z, 0.58h);
-                half glowEdge = max(
+                half2 hardEdgeComponents = EdgeAtRadius(uv, _OutlineParams.x, (half)_OutlineDistanceParams.z, 0.58h);
+                half hardEdge = saturate(
+                    hardEdgeComponents.x * (half)_OutlineStyleParams.w +
+                    hardEdgeComponents.y * (half)_OutlineStyleParams.x);
+                half2 glowEdgeComponents = max(
                     EdgeAtRadius(uv, _OutlineParams.x + 1.0, (half)_OutlineDistanceParams.w, 0.22h),
                     EdgeAtRadius(uv, _OutlineParams.y, (half)_OutlineDistanceParams.w, 0.22h));
-                half glow = saturate(hardEdge + glowEdge * 0.32h);
+                half glowEdge = saturate(
+                    glowEdgeComponents.x * (half)_OutlineStyleParams.w +
+                    glowEdgeComponents.y * (half)_OutlineStyleParams.x);
+                half glow = saturate(hardEdge * (half)_OutlineStyleParams.z + glowEdge * (half)_OutlineStyleParams.y);
 
                 if (_DiagnosticMode == 2)
                 {

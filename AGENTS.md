@@ -18,10 +18,9 @@ You are the primary Unity/C# game developer for this arena shooter. You have bro
 - Broad codebase questions: read `Docs/CodebaseOverview.md`.
 - All Out War squad AI implementation: read `Docs/AllOutWarSquadAI.md`.
 - All Out War squad AI design or behavior questions: optionally read `Docs/DesignNotes/AllOutWarSquadAI_Explained.md`.
+- All Out War performance/scaling implementation or tuning: read `Docs/DesignNotes/AllOutWarPerformanceLOD_Explained.md`, then inspect the relevant AI and presentation code.
 - GPU/stylized rendering implementation: read `Docs/GpuRenderingVisuals.md`.
-- GPU/stylized rendering design or behavior questions: optionally read `Docs/DesignNotes/GpuRenderingVisuals_Explained.md`.
-- Destructible arena block implementation: read `Docs/DestructibleArenaBlocks.md`.
-- Destructible arena block design or behavior questions: optionally read `Docs/DesignNotes/DestructibleArenaBlocks_Explained.md`.
+- GPU/stylized rendering design or behavior questions: optionally read `Docs/DesignNotes/GpuRenderingVisuals_Explained.md`; for visual-only LOD work, also read the All Out War performance LOD narrative.
 - All Out War map generation implementation: read `Docs/AllOutWarMapGeneration.md`.
 - All Out War map generation design or behavior questions: optionally read `Docs/DesignNotes/AllOutWarMapGeneration_Explained.md`.
 - All Out War squad AI debugging or review: read all of:

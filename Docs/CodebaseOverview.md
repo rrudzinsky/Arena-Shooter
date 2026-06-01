@@ -31,6 +31,8 @@ Related files include:
 
 All Out War squad design is documented in `Docs/AllOutWarSquadAI.md`. For a more narrative explanation of how the system behaves, read `Docs/DesignNotes/AllOutWarSquadAI_Explained.md`.
 
+All Out War soldier scaling and performance LOD are explained in `Docs/DesignNotes/AllOutWarPerformanceLOD_Explained.md`. Start there when changing soldier LOD tiers, AI scan throttling, LOS/pathing cadence, presentation throttling, or future squad background simulation.
+
 ## Player
 
 `PlayerFpsController.cs` handles first-person movement and player control. `FirstPersonViewModel.cs` and related asset builders control weapon/hand presentation. `PrototypeHud.cs` displays player-facing HUD data.
@@ -55,7 +57,7 @@ All Out War AI uses limited ammo and squad-carried resource behavior, so changes
 
 `DestructibleArenaPiece.cs` owns chunked destructible walls/floors/pillars, projectile pass-through checks, damage contours, neighbor shatter, and destructible outline proxy behavior.
 
-Destructible arena behavior is documented in `Docs/DestructibleArenaBlocks.md`. For a narrative explanation, read `Docs/DesignNotes/DestructibleArenaBlocks_Explained.md`.
+Destructible arena behavior is currently owned by `Assets/Scripts/ArenaShooter/DestructibleArenaPiece.cs`; the old chunk-owned destructible docs were removed after the wall visual model moved to contour-owned cuts.
 
 ## UI And Menus
 
@@ -67,9 +69,13 @@ Destructible arena behavior is documented in `Docs/DestructibleArenaBlocks.md`. 
 
 Many files ending in `Asset.cs` procedurally construct or configure runtime/editor assets for arena pieces, droids, weapons, pickups, gates, and healing stations.
 
-Stylized rendering and outline behavior is centered on `Assets/Scripts/ArenaShooter/Rendering/DroidOutlineRendererFeature.cs`, `DroidRenderSetup.cs`, and shaders under `Assets/Shaders`.
+Droid visuals are assembled from imported body validation, fallback procedural body construction, a separate generated blaster rig, crouch/root presentation helpers, and visual walk animation helpers. Current imported droid bodies use stable whole-body presentation only; procedural fallback droids keep the old limb animation path. For design context on this split, read `Docs/DesignNotes/GpuRenderingVisuals_Explained.md`.
+
+Stylized rendering and outline behavior is centered on `Assets/Scripts/ArenaShooter/Rendering/DroidOutlineRendererFeature.cs`, `DroidRenderSetup.cs`, `ArenaTheme.cs`, and shaders under `Assets/Shaders`. The outline feature keeps its legacy droid-oriented class name, but it functions as the general stylized neon silhouette pipeline with per-category style profiles.
 
 GPU/stylized visuals are documented in `Docs/GpuRenderingVisuals.md`. For a narrative explanation, read `Docs/DesignNotes/GpuRenderingVisuals_Explained.md`.
+
+The All Out War performance LOD narrative also covers visual/presentation throttling for health bars, animation, footsteps, and far beam effects. Use it with the GPU visuals docs when tuning visual-only LOD behavior: `Docs/DesignNotes/AllOutWarPerformanceLOD_Explained.md`.
 
 Audio helpers include:
 

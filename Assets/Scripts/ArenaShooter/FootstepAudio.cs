@@ -6,6 +6,7 @@ namespace ArenaShooter
     public sealed class FootstepAudio : MonoBehaviour
     {
         private CharacterController controller;
+        private Camera lodCamera;
         private Vector3 lastPosition;
         private float distanceSinceStep;
         private float nextStepAt;
@@ -35,6 +36,11 @@ namespace ArenaShooter
             }
         }
 
+        public void ConfigureLod(Camera camera)
+        {
+            lodCamera = camera;
+        }
+
         private void Awake()
         {
             controller = GetComponent<CharacterController>();
@@ -46,6 +52,13 @@ namespace ArenaShooter
             if (ArenaAudio.Instance == null || controller == null)
             {
                 lastPosition = transform.position;
+                return;
+            }
+
+            if (!playerFootsteps && ShouldSuppressRemoteFootsteps())
+            {
+                lastPosition = transform.position;
+                distanceSinceStep = 0f;
                 return;
             }
 
@@ -109,6 +122,28 @@ namespace ArenaShooter
             }
 
             return spatial ? 0.52f : 0.58f;
+        }
+
+        private bool ShouldSuppressRemoteFootsteps()
+        {
+            if (lodCamera == null)
+            {
+                return false;
+            }
+
+            var toCamera = transform.position - lodCamera.transform.position;
+            if (toCamera.sqrMagnitude <= 45f * 45f)
+            {
+                return false;
+            }
+
+            var viewport = lodCamera.WorldToViewportPoint(transform.position + Vector3.up * 0.6f);
+            return viewport.z <= 0f ||
+                viewport.x < -0.15f ||
+                viewport.x > 1.15f ||
+                viewport.y < -0.15f ||
+                viewport.y > 1.15f ||
+                toCamera.sqrMagnitude > 78f * 78f;
         }
     }
 }

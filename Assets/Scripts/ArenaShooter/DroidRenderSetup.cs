@@ -26,7 +26,7 @@ namespace ArenaShooter
         public const uint MedicalRenderingLayer = 1u << 4;
         public const uint AmmoRenderingLayer = 1u << 5;
         public const uint GunRenderingLayer = 1u << 6;
-        public const float DefaultOutlineIntensity = 2.35f;
+        public const float DefaultOutlineIntensity = 1.1f;
         private const int MaxAssignmentExampleLogsPerCategory = 8;
         private static readonly Dictionary<StylizedOutlineCategory, int> AssignmentCounts = new Dictionary<StylizedOutlineCategory, int>();
         private static readonly HashSet<string> LoggedAssignmentExamples = new HashSet<string>();
@@ -87,14 +87,19 @@ namespace ArenaShooter
         {
             return category switch
             {
-                StylizedOutlineCategory.Floor => new Color(4.2f, 0.04f, 3.1f, 1f),
-                StylizedOutlineCategory.Wall => new Color(0.12f, 0.26f, 1.85f, 1f),
-                StylizedOutlineCategory.Droid => new Color(1f, 0.64f, 0.08f, 1f),
-                StylizedOutlineCategory.Medical => new Color(4.2f, 0.15f, 0.08f, 1f),
-                StylizedOutlineCategory.Ammo => new Color(3.6f, 2.8f, 0.08f, 1f),
-                StylizedOutlineCategory.Gun => new Color(0.1f, 2.6f, 3.8f, 1f),
+                StylizedOutlineCategory.Floor => new Color(1.05f, 0.18f, 1.35f, 1f),
+                StylizedOutlineCategory.Wall => ResolveWallLineColor(),
+                StylizedOutlineCategory.Droid => new Color(1.45f, 0.88f, 0.16f, 1f),
+                StylizedOutlineCategory.Medical => new Color(1.8f, 0.18f, 0.38f, 1f),
+                StylizedOutlineCategory.Ammo => new Color(1.9f, 1.48f, 0.16f, 1f),
+                StylizedOutlineCategory.Gun => new Color(0.12f, 1.85f, 2.25f, 1f),
                 _ => Color.clear
             };
+        }
+
+        public static Color ResolveWallLineColor()
+        {
+            return new Color(0.04f, 1.05f, 0.72f, 1f);
         }
 
         public static Color ResolveEffectiveOutlineColor(StylizedOutlineCategory category, float intensity = DefaultOutlineIntensity)

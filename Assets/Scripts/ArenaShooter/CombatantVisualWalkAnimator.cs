@@ -37,13 +37,25 @@ namespace ArenaShooter
         private Part rightFoot;
         private Part leftFallbackArm;
         private Part rightFallbackArm;
+        private Camera lodCamera;
         private Vector3 lastPosition;
         private float walkAmount;
         private float phase;
         private float crouchBlend;
+        private float nextLodUpdateAt;
+        private float lastSampleTime;
         private bool crouching;
         private bool cached;
         private bool hasLastPosition;
+        private bool usesImportedBody;
+        private const float FullAnimationDistance = 40f;
+        private const float ReducedAnimationDistance = 86f;
+        private const float MaxAnimationSampleDelta = 0.25f;
+
+        public void ConfigureLod(Camera camera)
+        {
+            lodCamera = camera;
+        }
 
         public void SetCrouching(bool isCrouching)
         {
@@ -57,6 +69,16 @@ namespace ArenaShooter
                 CacheParts();
             }
 
+            if (ShouldSkipAnimationFrame())
+            {
+                return;
+            }
+
+            var sampleTime = Time.time;
+            var rawSampleDelta = hasLastPosition
+                ? Mathf.Max(sampleTime - lastSampleTime, 0.0001f)
+                : Mathf.Max(Time.deltaTime, 0.0001f);
+            var animationDelta = Mathf.Min(rawSampleDelta, MaxAnimationSampleDelta);
             var movement = Vector3.zero;
             if (hasLastPosition)
             {
@@ -65,15 +87,45 @@ namespace ArenaShooter
             }
 
             lastPosition = transform.position;
+            lastSampleTime = sampleTime;
             hasLastPosition = true;
 
-            var speed = Time.deltaTime > 0f ? movement.magnitude / Time.deltaTime : 0f;
+            var speed = movement.magnitude / rawSampleDelta;
             var targetWalk = Mathf.Clamp01(speed / 2.3f);
-            walkAmount = Mathf.MoveTowards(walkAmount, targetWalk, Time.deltaTime * 4.8f);
-            crouchBlend = Mathf.MoveTowards(crouchBlend, crouching ? 1f : 0f, Time.deltaTime * 7.5f);
-            phase += Time.deltaTime * Mathf.Lerp(crouching ? 2.8f : 5.2f, crouching ? 4.6f : 8.8f, walkAmount);
+            walkAmount = Mathf.MoveTowards(walkAmount, targetWalk, animationDelta * 4.8f);
+            crouchBlend = Mathf.MoveTowards(crouchBlend, crouching ? 1f : 0f, animationDelta * 7.5f);
+            phase += animationDelta * Mathf.Lerp(crouching ? 2.8f : 5.2f, crouching ? 4.6f : 8.8f, walkAmount);
 
             ApplyWalkPose();
+        }
+
+        private bool ShouldSkipAnimationFrame()
+        {
+            if (lodCamera == null)
+            {
+                return false;
+            }
+
+            var toCamera = transform.position - lodCamera.transform.position;
+            var distanceSqr = toCamera.sqrMagnitude;
+            if (distanceSqr <= FullAnimationDistance * FullAnimationDistance)
+            {
+                return false;
+            }
+
+            if (Time.time < nextLodUpdateAt)
+            {
+                return true;
+            }
+
+            var viewport = lodCamera.WorldToViewportPoint(transform.position + Vector3.up * 0.8f);
+            var inView = viewport.z > 0f &&
+                viewport.x >= -0.15f &&
+                viewport.x <= 1.15f &&
+                viewport.y >= -0.15f &&
+                viewport.y <= 1.15f;
+            nextLodUpdateAt = Time.time + (inView && distanceSqr <= ReducedAnimationDistance * ReducedAnimationDistance ? 0.16f : 0.45f);
+            return !inView || distanceSqr > ReducedAnimationDistance * ReducedAnimationDistance;
         }
 
         private void CacheParts()
@@ -84,6 +136,13 @@ namespace ArenaShooter
                 model = FindPart("droid combat frame model");
             }
             visualRoot = model != null ? new Part(model) : default;
+            usesImportedBody = model != null && HasDescendantNamed(model, "imported cyber battle droid mesh");
+            if (usesImportedBody)
+            {
+                cached = true;
+                return;
+            }
+
             leftUpperArm = FindTrackedPart("left upper arm");
             rightUpperArm = FindTrackedPart("right upper arm");
             leftForearm = FindTrackedPart("left forearm");
@@ -124,10 +183,12 @@ namespace ArenaShooter
             var leftLift = Mathf.Max(0f, leftStride) * walkAmount;
             var rightLift = Mathf.Max(0f, rightStride) * walkAmount;
 
-            ApplyJointedWalkPose(leftStride, rightStride, leftLift, rightLift, scoot);
-
-            ApplyBlendedRotation(leftFallbackArm, swing * 18f, 0f, counterSwing * 8f, -18f, -5f, -18f);
-            ApplyBlendedRotation(rightFallbackArm, counterSwing * 18f, 0f, swing * 8f, -20f, 5f, 18f);
+            if (!usesImportedBody)
+            {
+                ApplyJointedWalkPose(leftStride, rightStride, leftLift, rightLift, scoot);
+                ApplyBlendedRotation(leftFallbackArm, swing * 18f, 0f, counterSwing * 8f, -18f, -5f, -18f);
+                ApplyBlendedRotation(rightFallbackArm, counterSwing * 18f, 0f, swing * 8f, -20f, 5f, 18f);
+            }
 
             if (visualRoot.Transform != null)
             {
@@ -383,6 +444,26 @@ namespace ArenaShooter
             }
 
             return null;
+        }
+
+        private static bool HasDescendantNamed(Transform root, string namePart)
+        {
+            if (root == null)
+            {
+                return false;
+            }
+
+            var target = namePart.ToLowerInvariant();
+            var children = root.GetComponentsInChildren<Transform>(true);
+            for (var i = 0; i < children.Length; i++)
+            {
+                if (children[i] != root && children[i].name.ToLowerInvariant().Contains(target))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private readonly struct Part

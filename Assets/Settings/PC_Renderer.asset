@@ -10,44 +10,117 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 348f041971e303343b364634a32b11ed, type: 3}
-  m_Name: Synthwave Screen Space Outlines
+  m_Name: Stylized Neon Screen Space Outlines
   m_EditorClassIdentifier: Assembly-CSharp::ArenaShooter.Rendering.DroidOutlineRendererFeature
   m_Active: 1
   settings:
     outlineBands:
-    - name: Floor Purple
+    - name: Floor Violet
       enabled: 1
       renderingLayerMask: 2
-      outlineColor: {r: 4.2, g: 0.04, b: 3.1, a: 1}
-    - name: Wall Blue
+      outlineColor: {r: 1.05, g: 0.18, b: 1.35, a: 1}
+      hardEdgePixels: 1
+      glowPixels: 2
+      intensity: 0.62
+      glowStrength: 0.14
+      hardEdgeStrength: 0.92
+      alphaEdgeStrength: 1
+      normalEdgeStrength: 0.03
+      normalEdgeThreshold: 0.18
+      distanceFadeStart: 24
+      distanceFadeEnd: 76
+      distantHardEdgeScale: 0.58
+      distantGlowScale: 0.16
+    - name: Wall Green Teal
       enabled: 1
       renderingLayerMask: 4
-      outlineColor: {r: 0.12, g: 0.26, b: 1.85, a: 1}
-    - name: Droid Gold
+      outlineColor: {r: 0.04, g: 1.05, b: 0.72, a: 1}
+      hardEdgePixels: 0.85
+      glowPixels: 1
+      intensity: 0.72
+      glowStrength: 0
+      hardEdgeStrength: 0.85
+      alphaEdgeStrength: 0.85
+      normalEdgeStrength: 0.45
+      normalEdgeThreshold: 0.18
+      distanceFadeStart: 24
+      distanceFadeEnd: 76
+      distantHardEdgeScale: 0.72
+      distantGlowScale: 0
+    - name: Droid Amber
       enabled: 1
       renderingLayerMask: 8
-      outlineColor: {r: 1, g: 0.64, b: 0.08, a: 1}
-    - name: Medical Red
+      outlineColor: {r: 1.45, g: 0.88, b: 0.16, a: 1}
+      hardEdgePixels: 1.25
+      glowPixels: 2.25
+      intensity: 0.78
+      glowStrength: 0.22
+      hardEdgeStrength: 1
+      alphaEdgeStrength: 1
+      normalEdgeStrength: 0.28
+      normalEdgeThreshold: 0.14
+      distanceFadeStart: 24
+      distanceFadeEnd: 76
+      distantHardEdgeScale: 0.52
+      distantGlowScale: 0.2
+    - name: Medical Rose
       enabled: 1
       renderingLayerMask: 16
-      outlineColor: {r: 4.2, g: 0.15, b: 0.08, a: 1}
-    - name: Ammo Yellow
+      outlineColor: {r: 1.8, g: 0.18, b: 0.38, a: 1}
+      hardEdgePixels: 1.2
+      glowPixels: 2.25
+      intensity: 0.82
+      glowStrength: 0.22
+      hardEdgeStrength: 1
+      alphaEdgeStrength: 1
+      normalEdgeStrength: 0.16
+      normalEdgeThreshold: 0.15
+      distanceFadeStart: 24
+      distanceFadeEnd: 76
+      distantHardEdgeScale: 0.52
+      distantGlowScale: 0.2
+    - name: Ammo Gold
       enabled: 1
       renderingLayerMask: 32
-      outlineColor: {r: 3.6, g: 2.8, b: 0.08, a: 1}
+      outlineColor: {r: 1.9, g: 1.48, b: 0.16, a: 1}
+      hardEdgePixels: 1.2
+      glowPixels: 2.25
+      intensity: 0.78
+      glowStrength: 0.22
+      hardEdgeStrength: 1
+      alphaEdgeStrength: 1
+      normalEdgeStrength: 0.16
+      normalEdgeThreshold: 0.15
+      distanceFadeStart: 24
+      distanceFadeEnd: 76
+      distantHardEdgeScale: 0.52
+      distantGlowScale: 0.2
     - name: Gun Cyan
       enabled: 1
       renderingLayerMask: 64
-      outlineColor: {r: 0.1, g: 2.6, b: 3.8, a: 1}
-    thicknessPixels: 2
-    glowPixels: 3
+      outlineColor: {r: 0.12, g: 1.85, b: 2.25, a: 1}
+      hardEdgePixels: 0.75
+      glowPixels: 1.25
+      intensity: 0.96
+      glowStrength: 0.16
+      hardEdgeStrength: 0.98
+      alphaEdgeStrength: 1
+      normalEdgeStrength: 0.12
+      normalEdgeThreshold: 0.13
+      distanceFadeStart: 24
+      distanceFadeEnd: 76
+      distantHardEdgeScale: 0.5
+      distantGlowScale: 0.16
+    thicknessPixels: 1
+    glowPixels: 2
     downsample: 1
-    normalEdgeThreshold: 0.12
-    intensity: 2.35
+    normalEdgeThreshold: 0.16
+    intensity: 1.1
     distanceFadeStart: 24
     distanceFadeEnd: 70
     distantHardEdgeScale: 0.48
     distantGlowScale: 0.24
+    useReferenceNeonStyle: 1
     diagnosticMode: 0
     diagnosticBandIndex: -1
     diagnosticIgnoreRenderingLayerFilter: 0

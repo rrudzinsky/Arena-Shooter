@@ -8,6 +8,9 @@ namespace ArenaShooter
     public sealed class ArenaAudio : MonoBehaviour
     {
         private const string SfxPath = "Audio/SFX/";
+        private const float CrowdLoopVolume = 0.04f;
+        private const float GameplayMusicTargetVolume = 0.42f;
+        private const float GameplayMusicFadeDuration = 7f;
 
         private AudioClip footstepClip;
         private AudioClip smallerGunshotClip;
@@ -18,9 +21,13 @@ namespace ArenaShooter
         private AudioClip crowdLoopClip;
         private AudioSource crowdSource;
         private AudioSource cheerSource;
+        private AudioSource musicSource;
         private bool gateOpenCrowdPlayed;
         private bool firstShotCrowdPlayed;
         private Coroutine gateCrowdSwell;
+        private Coroutine musicFade;
+        private int lastMusicIndex = -1;
+        private float currentCheerRawVolume = 0.65f;
 
         public static ArenaAudio Instance { get; private set; }
 
@@ -39,12 +46,29 @@ namespace ArenaShooter
             crowdSource.clip = crowdLoopClip;
             crowdSource.loop = true;
             crowdSource.spatialBlend = 0f;
-            crowdSource.volume = 0.04f;
+            crowdSource.volume = ScaleSfxVolume(CrowdLoopVolume);
             crowdSource.Play();
 
             cheerSource = gameObject.AddComponent<AudioSource>();
             cheerSource.spatialBlend = 0f;
-            cheerSource.volume = 0.65f;
+            cheerSource.volume = ScaleSfxVolume(0.65f);
+
+            musicSource = gameObject.AddComponent<AudioSource>();
+            musicSource.loop = false;
+            musicSource.playOnAwake = false;
+            musicSource.spatialBlend = 0f;
+            musicSource.volume = 0f;
+            PlayRandomMusicTrack();
+        }
+
+        private void Update()
+        {
+            if (musicSource == null || musicSource.isPlaying || musicFade != null)
+            {
+                return;
+            }
+
+            PlayRandomMusicTrack();
         }
 
         public void PlayFootstep(Vector3 position, float volume, float range, bool spatial)
@@ -101,6 +125,24 @@ namespace ArenaShooter
             PlaySpatial(PickClip(playerHitClips), position, 0.72f, Random.Range(0.96f, 1.04f), 18f);
         }
 
+        public void ApplySavedVolumes()
+        {
+            if (crowdSource != null)
+            {
+                crowdSource.volume = ScaleSfxVolume(CrowdLoopVolume);
+            }
+
+            if (musicSource != null && musicFade == null)
+            {
+                musicSource.volume = ScaleMusicVolume(GameplayMusicTargetVolume);
+            }
+
+            if (cheerSource != null)
+            {
+                cheerSource.volume = ScaleSfxVolume(currentCheerRawVolume);
+            }
+        }
+
         private void PlayCrowdExcited()
         {
             if (cheerSource == null)
@@ -120,7 +162,8 @@ namespace ArenaShooter
 
             cheerSource.Stop();
             cheerSource.clip = clip;
-            cheerSource.volume = volume;
+            currentCheerRawVolume = volume;
+            cheerSource.volume = ScaleSfxVolume(volume);
             cheerSource.pitch = pitch;
             cheerSource.Play();
         }
@@ -136,7 +179,7 @@ namespace ArenaShooter
             sound.transform.position = position;
             var source = sound.AddComponent<AudioSource>();
             source.clip = clip;
-            source.volume = volume;
+            source.volume = ScaleSfxVolume(volume);
             source.pitch = pitch;
             source.spatialBlend = 1f;
             source.minDistance = 2f;
@@ -156,7 +199,7 @@ namespace ArenaShooter
             var sound = new GameObject($"Audio {clip.name}");
             var source = sound.AddComponent<AudioSource>();
             source.clip = clip;
-            source.volume = volume;
+            source.volume = ScaleSfxVolume(volume);
             source.pitch = pitch;
             source.spatialBlend = 0f;
             source.Play();
@@ -175,7 +218,8 @@ namespace ArenaShooter
             cheerSource.Stop();
             cheerSource.clip = clip;
             cheerSource.pitch = 1f;
-            cheerSource.volume = 0.12f;
+            currentCheerRawVolume = 0.12f;
+            cheerSource.volume = ScaleSfxVolume(currentCheerRawVolume);
             cheerSource.Play();
 
             var elapsed = 0f;
@@ -183,11 +227,109 @@ namespace ArenaShooter
             {
                 elapsed += Time.deltaTime;
                 var t = Mathf.Clamp01(elapsed / duration);
-                cheerSource.volume = Mathf.Lerp(0.12f, 0.82f, t * t);
+                currentCheerRawVolume = Mathf.Lerp(0.12f, 0.82f, t * t);
+                cheerSource.volume = ScaleSfxVolume(currentCheerRawVolume);
                 yield return null;
             }
 
-            cheerSource.volume = 0.82f;
+            currentCheerRawVolume = 0.82f;
+            cheerSource.volume = ScaleSfxVolume(currentCheerRawVolume);
+        }
+
+        private void PlayRandomMusicTrack()
+        {
+            var clip = LoadRandomMusicTrack(out var selectedIndex);
+            if (clip == null)
+            {
+                return;
+            }
+
+            musicSource.Stop();
+            musicSource.clip = clip;
+            musicSource.time = 0f;
+            musicSource.volume = 0f;
+            musicSource.Play();
+            lastMusicIndex = selectedIndex;
+
+            if (musicFade != null)
+            {
+                StopCoroutine(musicFade);
+            }
+
+            musicFade = StartCoroutine(FadeInGameplayMusic());
+        }
+
+        private AudioClip LoadRandomMusicTrack(out int selectedIndex)
+        {
+            selectedIndex = -1;
+            var paths = ArenaMusicLibrary.TrackResourcePaths;
+            if (paths == null || paths.Length == 0)
+            {
+                return null;
+            }
+
+            var startIndex = Random.Range(0, paths.Length);
+            if (paths.Length > 1 && startIndex == lastMusicIndex)
+            {
+                startIndex = (startIndex + 1) % paths.Length;
+            }
+
+            for (var offset = 0; offset < paths.Length; offset++)
+            {
+                var index = (startIndex + offset) % paths.Length;
+                if (paths.Length > 1 && index == lastMusicIndex)
+                {
+                    continue;
+                }
+
+                var clip = Resources.Load<AudioClip>(paths[index]);
+                if (clip != null)
+                {
+                    selectedIndex = index;
+                    return clip;
+                }
+            }
+
+            if (lastMusicIndex >= 0 && lastMusicIndex < paths.Length)
+            {
+                var fallback = Resources.Load<AudioClip>(paths[lastMusicIndex]);
+                if (fallback != null)
+                {
+                    selectedIndex = lastMusicIndex;
+                    return fallback;
+                }
+            }
+
+            return null;
+        }
+
+        private System.Collections.IEnumerator FadeInGameplayMusic()
+        {
+            if (musicSource == null)
+            {
+                yield break;
+            }
+
+            var elapsed = 0f;
+            while (elapsed < GameplayMusicFadeDuration)
+            {
+                elapsed += Time.unscaledDeltaTime;
+                musicSource.volume = ScaleMusicVolume(Mathf.Clamp01(elapsed / GameplayMusicFadeDuration) * GameplayMusicTargetVolume);
+                yield return null;
+            }
+
+            musicSource.volume = ScaleMusicVolume(GameplayMusicTargetVolume);
+            musicFade = null;
+        }
+
+        private static float ScaleMusicVolume(float volume)
+        {
+            return volume * ArenaUserSettings.MusicVolume;
+        }
+
+        private static float ScaleSfxVolume(float volume)
+        {
+            return volume * ArenaUserSettings.SfxVolume;
         }
 
         private AudioClip LoadClip(string clipName)

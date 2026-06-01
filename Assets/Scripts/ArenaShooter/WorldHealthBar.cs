@@ -7,14 +7,18 @@ namespace ArenaShooter
     {
         private CombatantHealth health;
         private Camera targetCamera;
+        private Canvas canvas;
         private Image fill;
         private Image shieldFill;
         private Image shieldBack;
         private Text nameText;
+        private float nextVisualUpdateAt;
         private Color fillColor = new Color(1f, 0.06f, 0.38f, 0.95f);
         private Color shieldColor = new Color(0.08f, 0.68f, 1f, 0.94f);
         private Color nameColor = new Color(1f, 0.78f, 0.96f);
         private Color nameOutlineColor = new Color(0f, 0f, 0f, 0.95f);
+        private const float FullUpdateDistance = 32f;
+        private const float VisibleDistance = 72f;
 
         public void Build(CombatantHealth trackedHealth, Camera cameraToFace)
         {
@@ -37,7 +41,7 @@ namespace ArenaShooter
                 health.Died += OnTrackedDied;
             }
 
-            var canvas = gameObject.AddComponent<Canvas>();
+            canvas = gameObject.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.WorldSpace;
             canvas.worldCamera = targetCamera;
             canvas.transform.localScale = Vector3.one * 0.012f;
@@ -64,6 +68,34 @@ namespace ArenaShooter
         private void LateUpdate()
         {
             if (health == null || targetCamera == null)
+            {
+                return;
+            }
+
+            if (Time.time < nextVisualUpdateAt)
+            {
+                return;
+            }
+
+            var toCamera = transform.position - targetCamera.transform.position;
+            var distanceSqr = toCamera.sqrMagnitude;
+            var viewport = targetCamera.WorldToViewportPoint(transform.position);
+            var visible = health.IsAlive &&
+                distanceSqr <= VisibleDistance * VisibleDistance &&
+                viewport.z > 0f &&
+                viewport.x >= -0.1f &&
+                viewport.x <= 1.1f &&
+                viewport.y >= -0.1f &&
+                viewport.y <= 1.1f;
+            if (canvas != null)
+            {
+                canvas.enabled = visible;
+            }
+
+            nextVisualUpdateAt = visible && distanceSqr <= FullUpdateDistance * FullUpdateDistance
+                ? Time.time
+                : Time.time + 0.22f;
+            if (!visible)
             {
                 return;
             }

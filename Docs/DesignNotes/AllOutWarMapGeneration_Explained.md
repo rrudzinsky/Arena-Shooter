@@ -27,7 +27,7 @@ The generated layout stores one shared circular definition:
 - `DomeRadius`
 - `PerimeterSpawnRadius`
 
-Those values are the contract between generation, visuals, collision, spawning, and resources. If one system uses a different radius, the game starts to feel wrong: the dome may not line up with the boundary, the safety floor may not cover the arena, or spawns may drift away from the wall.
+Those values are the contract between generation, visuals, collision, spawning, and resources. If one system uses a different radius, the game starts to feel wrong: the dome may not line up with the boundary, the continuous floor may not cover the arena, or spawns may drift away from the wall.
 
 ## Building The Room Graph
 
@@ -62,13 +62,15 @@ All Out War adds exceptions:
 
 This keeps the map structured without turning every perimeter spawn into a boxed room.
 
-## Dome, Boundary, And Safety Floor
+## Dome, Boundary, And Continuous Floor
 
 The visible dome is built by `ShieldDomeBackdrop` using the layout's dome radius. It creates colored curved bands, horizon glow, and faint hex-like seams.
 
 The physical edge blocker is separate. `ArenaGenerator` creates an invisible circular boundary ring from box-collider segments positioned around the dome base. This is a cheap vertical wall ring, not a full dome collision shell.
 
-The safety floor disk uses the same center and radius model so the player cannot fall through small uncovered gaps at the arena edge.
+All Out War also creates one continuous dome floor disk using the same center and radius model. This is real physical ground, not just a visual backup. Room floors, corridor floors, and clearing floor links still exist, but the dome floor underneath them makes the entire interior footprint walkable.
+
+This matters for negative space between structures. If four nearby rooms or walls enclose a hidden pocket that was unreachable at match start, that pocket still has floor because it sits inside the dome disk. Destruction and player vaulting can expose that pocket without the player falling through the world.
 
 ## Resources
 
@@ -92,7 +94,7 @@ The high-level flow is:
 
 1. Read All Out War settings.
 2. Compute grid radius from battlefield cap.
-3. Generate the circular layout, geometry, safety floor, and boundary.
+3. Generate the circular layout, geometry, continuous floor, and boundary.
 4. Build dome visuals and lights.
 5. Bake runtime NavMesh.
 6. Create player at army 0 perimeter spawn.
@@ -108,6 +110,8 @@ The strategic structure is still a room graph. NavMesh improves movement, but ma
 The map does not currently use a full spatial influence map, terrain heatmap, or cover analysis pass.
 
 Destroyed walls do not affect NavMesh walkability after the initial bake.
+
+The continuous dome floor makes between-room pockets physically walkable for the player when they become reachable, but it does not by itself teach squads or NavMesh to use destroyed-wall shortcuts.
 
 The dome boundary is intentionally a vertical ring. It blocks walking out at ground level but does not simulate collision over the whole curved dome surface.
 

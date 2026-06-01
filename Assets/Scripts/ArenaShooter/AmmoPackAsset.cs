@@ -77,18 +77,15 @@ namespace ArenaShooter
                 var materials = renderer.sharedMaterials;
                 for (var i = 0; i < materials.Length; i++)
                 {
-                    materials[i] = ResolveThemeMaterial(renderer.name, materials[i], theme);
+                    materials[i] = ResolveThemeMaterial(theme);
                 }
 
                 renderer.sharedMaterials = materials;
             }
         }
 
-        private static Material ResolveThemeMaterial(string rendererName, Material source, ArenaTheme theme)
+        private static Material ResolveThemeMaterial(ArenaTheme theme)
         {
-            var materialName = source != null ? source.name : string.Empty;
-            var key = $"{rendererName} {materialName}".ToLowerInvariant();
-
             return theme.Wall;
         }
     }

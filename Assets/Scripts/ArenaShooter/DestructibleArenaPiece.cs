@@ -19,17 +19,61 @@ namespace ArenaShooter
         private const float NeighborShatterDamage = 64f;
         private const float DamageContourInset = 0.006f;
         private const float OutlineShellInflation = 0.015f;
+        private const float MinimumWallOutlineFloorSeamSink = 0.35f;
+        private const float WallOutlineProxyDepthOffset = OutlineShellInflation;
+        private const float WallDamageRimDepthBias = 0.01f;
+        private const float WallDamageRimThickness = 0.006f;
+        private const string ContourClippedWallBodyShaderName = "Hidden/ArenaShooter/ContourClippedWallBody";
         private const int DamageStampSegments = 32;
         private const float DamageContourJaggedness = 0.26f;
+        private const float MinimumVaultOpeningWidth = 0.92f;
+        private const float MinimumVaultOpeningHeight = 0.82f;
+        private const float MaximumVaultOpeningBottom = 1.08f;
+        private const float MinimumVaultOpeningTop = 0.78f;
+        private const float MaximumVaultApproachDistance = 2.25f;
+        private const float MaximumVaultPlaneDistance = 1.25f;
+        private static readonly Vector3Int[] OutlineNeighborOffsets =
+        {
+            Vector3Int.right,
+            Vector3Int.left,
+            Vector3Int.up,
+            Vector3Int.down,
+            new Vector3Int(0, 0, 1),
+            new Vector3Int(0, 0, -1)
+        };
+
+        private static readonly Vector3[] OutlineFaceNormals =
+        {
+            Vector3.right,
+            Vector3.left,
+            Vector3.up,
+            Vector3.down,
+            Vector3.forward,
+            Vector3.back
+        };
 
         private readonly Dictionary<Vector3Int, Chunk> chunksByIndex = new();
         private readonly List<Chunk> chunks = new();
+        private readonly List<DamageStamp> wallDamageStamps = new();
+        private static readonly int WallDamageStampCountId = Shader.PropertyToID("_WallDamageStampCount");
+        private static readonly int WallDamagePointCountId = Shader.PropertyToID("_WallDamagePointCount");
+        private static readonly int WallDamageClipEnabledId = Shader.PropertyToID("_WallDamageClipEnabled");
+        private static readonly int WallDamageUId = Shader.PropertyToID("_WallDamageU");
+        private static readonly int WallDamageVId = Shader.PropertyToID("_WallDamageV");
+        private static readonly int WallDamageStampBoundsId = Shader.PropertyToID("_WallDamageStampBounds");
+        private static readonly int WallDamageStampPointsId = Shader.PropertyToID("_WallDamageStampPoints");
         private Vector3 configuredSize;
         private Material configuredIntactMaterial;
         private Material intactMaterial;
         private Material destructibleBodyMaterial;
+        private Material clippedWallBodyMaterial;
         private Material damageContourMaterial;
         private Material outlineProxyMaterial;
+        private ComputeBuffer wallDamageStampBoundsBuffer;
+        private ComputeBuffer wallDamageStampPointsBuffer;
+        private MaterialPropertyBlock wallDamagePropertyBlock;
+        private int wallDamageStampBoundsCapacity;
+        private int wallDamageStampPointsCapacity;
         private StylizedOutlineCategory configuredOutlineCategory = StylizedOutlineCategory.None;
         private DestructibleDamageProfile damageProfile = DestructibleDamageProfile.Wall;
         private Vector3 configuredBiteDirectionLocal = Vector3.zero;
@@ -40,7 +84,24 @@ namespace ArenaShooter
         private MeshFilter damageContourMeshFilter;
         private MeshRenderer damageContourRenderer;
         private BoxCollider surfaceCollider;
+        private Vector3Int chunkCounts;
         private bool initialized;
+
+        public readonly struct PlayerVaultSolution
+        {
+            public readonly Vector3 EntryPosition;
+            public readonly Vector3 ExitPosition;
+            public readonly Vector3 ApexPosition;
+            public readonly Collider SourceCollider;
+
+            public PlayerVaultSolution(Vector3 entryPosition, Vector3 exitPosition, Vector3 apexPosition, Collider sourceCollider)
+            {
+                EntryPosition = entryPosition;
+                ExitPosition = exitPosition;
+                ApexPosition = apexPosition;
+                SourceCollider = sourceCollider;
+            }
+        }
 
         private sealed class Chunk
         {
@@ -81,6 +142,26 @@ namespace ArenaShooter
             }
         }
 
+        private readonly struct DamageComponentPlaneBounds
+        {
+            public readonly float MinU;
+            public readonly float MaxU;
+            public readonly float MinV;
+            public readonly float MaxV;
+
+            public DamageComponentPlaneBounds(float minU, float maxU, float minV, float maxV)
+            {
+                MinU = minU;
+                MaxU = maxU;
+                MinV = minV;
+                MaxV = maxV;
+            }
+
+            public float Width => MaxU - MinU;
+            public float Height => MaxV - MinV;
+            public bool IsValid => MaxU > MinU && MaxV > MinV;
+        }
+
         private sealed class ContourSegmentGroup
         {
             public readonly List<int> SegmentIndexes = new();
@@ -113,6 +194,20 @@ namespace ArenaShooter
             }
         }
 
+        private sealed class DamageContourPlan
+        {
+            public readonly List<ContourSegment2D> FrontSegments;
+            public readonly float Thickness;
+
+            public DamageContourPlan(
+                List<ContourSegment2D> frontSegments,
+                float thickness)
+            {
+                FrontSegments = frontSegments;
+                Thickness = thickness;
+            }
+        }
+
         public void Configure(float health)
         {
             Configure(health, Vector3.zero);
@@ -142,9 +237,21 @@ namespace ArenaShooter
             configuredOutlineCategory = outlineCategory;
             damageProfile = profile;
             destructibleBodyMaterial = null;
+            clippedWallBodyMaterial = null;
+            wallDamageStamps.Clear();
             configuredBiteDirectionLocal = biteDirectionWorld.sqrMagnitude > 0.0001f
                 ? transform.InverseTransformDirection(biteDirectionWorld.normalized)
                 : Vector3.zero;
+
+            if (UsesContourOwnedWallDamage())
+            {
+                InitializeChunks();
+            }
+        }
+
+        private void OnDestroy()
+        {
+            ReleaseWallDamageShaderBuffers();
         }
 
         public void TakeDamage(float amount)
@@ -165,6 +272,14 @@ namespace ArenaShooter
             }
 
             InitializeChunks();
+            if (UsesContourOwnedWallDamage())
+            {
+                AddContourOwnedWallDamage(hitPoint);
+                RebuildCombinedMesh();
+                SpawnImpactDebris(hitPoint, hitNormal, intactMaterial, 4);
+                return;
+            }
+
             var chunk = FindHitChunk(hitPoint);
             if (chunk == null || chunk.Destroyed)
             {
@@ -183,8 +298,60 @@ namespace ArenaShooter
                 return false;
             }
 
+            if (UsesContourOwnedWallDamage())
+            {
+                var localPoint = transform.InverseTransformPoint(hitPoint);
+                return IsPointInsideWallDamageUnion(ProjectLocalPointToWallUv(localPoint));
+            }
+
             var chunk = FindHitChunk(hitPoint);
             return chunk == null || chunk.Destroyed;
+        }
+
+        public bool IsFloorSurface()
+        {
+            return damageProfile == DestructibleDamageProfile.Floor || configuredOutlineCategory == StylizedOutlineCategory.Floor;
+        }
+
+        public bool TryResolvePlayerVault(Vector3 playerPosition, Vector3 playerForward, float playerRadius, float playerHeight, out PlayerVaultSolution solution)
+        {
+            solution = default;
+            if (!initialized ||
+                damageProfile != DestructibleDamageProfile.Wall ||
+                configuredOutlineCategory == StylizedOutlineCategory.Floor ||
+                playerForward.sqrMagnitude <= 0.001f)
+            {
+                return false;
+            }
+
+            var localPlayer = transform.InverseTransformPoint(playerPosition);
+            var localForward = transform.InverseTransformDirection(playerForward.normalized);
+            localForward.y = 0f;
+            if (localForward.sqrMagnitude <= 0.001f)
+            {
+                return false;
+            }
+
+            localForward.Normalize();
+            var wallNormal = GetWallNormalLocal();
+            var sideSign = Mathf.Sign(Vector3.Dot(localPlayer, wallNormal));
+            if (Mathf.Abs(sideSign) <= 0.001f)
+            {
+                sideSign = Vector3.Dot(localForward, wallNormal) <= 0f ? 1f : -1f;
+            }
+
+            var sideNormal = wallNormal * sideSign;
+            if (Vector3.Dot(localForward, -sideNormal) < 0.34f || Mathf.Abs(Vector3.Dot(localPlayer, wallNormal)) > MaximumVaultPlaneDistance)
+            {
+                return false;
+            }
+
+            if (UsesContourOwnedWallDamage())
+            {
+                return TryResolveContourOwnedWallVault(playerPosition, localPlayer, localForward, wallNormal, sideNormal, playerRadius, playerHeight, out solution);
+            }
+
+            return false;
         }
 
         private void InitializeChunks()
@@ -221,6 +388,11 @@ namespace ArenaShooter
             combinedRenderer.sharedMaterial = GetDestructibleBodyMaterial();
             DroidRenderSetup.ApplyRenderer(combinedRenderer, StylizedOutlineCategory.None);
 
+            if (!UsesContourOwnedWallDamage())
+            {
+                BuildChunkGrid(sourceSize);
+            }
+
             if (configuredOutlineCategory != StylizedOutlineCategory.None && configuredOutlineCategory != StylizedOutlineCategory.Floor)
             {
                 var outlineSource = new GameObject("Destructible Wall Outline Source");
@@ -229,7 +401,8 @@ namespace ArenaShooter
                 outlineSourceRenderer = outlineSource.AddComponent<MeshRenderer>();
                 outlineSourceRenderer.sharedMaterial = GetOutlineProxyMaterial();
                 DroidRenderSetup.ApplyRenderer(outlineSourceRenderer, configuredOutlineCategory);
-                RebuildOutlineSourceMesh(sourceSize);
+
+                RebuildOutlineSourceMesh();
             }
 
             var contour = new GameObject("Destructible Damage Contours");
@@ -239,11 +412,10 @@ namespace ArenaShooter
             damageContourRenderer.sharedMaterial = GetDamageContourMaterial();
             DroidRenderSetup.ApplyRenderer(damageContourRenderer, StylizedOutlineCategory.None);
 
-            BuildChunkGrid(sourceSize);
             RebuildCombinedMesh();
         }
 
-        private void RebuildOutlineSourceMesh(Vector3 sourceSize)
+        private void RebuildOutlineSourceMesh()
         {
             if (outlineSourceMeshFilter == null)
             {
@@ -252,9 +424,212 @@ namespace ArenaShooter
 
             var vertices = new List<Vector3>();
             var triangles = new List<int>();
-            var inflatedSize = sourceSize + Vector3.one * (OutlineShellInflation * 2f);
-            AddSolidBlock(vertices, triangles, Vector3.zero, inflatedSize);
+            if (UsesContourOwnedWallDamage())
+            {
+                AddContourOwnedWallOutlineSourceGeometry(vertices, triangles);
+                outlineSourceMeshFilter.sharedMesh = vertices.Count == 0
+                    ? null
+                    : CreateMesh("Destructible Wall Outline Source Mesh", vertices, new[] { triangles });
+                return;
+            }
+
+            var outlineSolidChunks = BuildOutlineProxySolidChunkSet();
+            foreach (var chunk in chunks)
+            {
+                if (!outlineSolidChunks.Contains(chunk))
+                {
+                    continue;
+                }
+
+                AddOutlineProxyChunkFaces(vertices, triangles, chunk, outlineSolidChunks);
+            }
+
+            if (vertices.Count == 0)
+            {
+                outlineSourceMeshFilter.sharedMesh = null;
+                return;
+            }
+
             outlineSourceMeshFilter.sharedMesh = CreateMesh("Destructible Wall Outline Source Mesh", vertices, new[] { triangles });
+        }
+
+        private HashSet<Chunk> BuildOutlineProxySolidChunkSet()
+        {
+            var solid = new HashSet<Chunk>();
+            var exteriorDestroyed = GatherExteriorConnectedDestroyedChunksForOutline();
+            foreach (var chunk in chunks)
+            {
+                if (!chunk.Destroyed || !exteriorDestroyed.Contains(chunk))
+                {
+                    solid.Add(chunk);
+                }
+            }
+
+            return solid;
+        }
+
+        private HashSet<Chunk> GatherExteriorConnectedDestroyedChunksForOutline()
+        {
+            var exterior = new HashSet<Chunk>();
+            var queue = new Queue<Chunk>();
+            GetPlaneNeighborDirections(GetWallNormalLocal(), out var right, out var up);
+            foreach (var chunk in chunks)
+            {
+                if (!chunk.Destroyed || !TouchesOutlinePlanePerimeter(chunk))
+                {
+                    continue;
+                }
+
+                exterior.Add(chunk);
+                queue.Enqueue(chunk);
+            }
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                TryQueueOutlineDestroyedNeighbor(current, right, exterior, queue);
+                TryQueueOutlineDestroyedNeighbor(current, -right, exterior, queue);
+                TryQueueOutlineDestroyedNeighbor(current, up, exterior, queue);
+                TryQueueOutlineDestroyedNeighbor(current, -up, exterior, queue);
+            }
+
+            return exterior;
+        }
+
+        private void TryQueueOutlineDestroyedNeighbor(Chunk chunk, Vector3Int offset, HashSet<Chunk> exterior, Queue<Chunk> queue)
+        {
+            if (!chunksByIndex.TryGetValue(chunk.Index + offset, out var neighbor) ||
+                !neighbor.Destroyed ||
+                exterior.Contains(neighbor))
+            {
+                return;
+            }
+
+            exterior.Add(neighbor);
+            queue.Enqueue(neighbor);
+        }
+
+        private bool TouchesOutlinePlanePerimeter(Chunk chunk)
+        {
+            if (damageProfile == DestructibleDamageProfile.Floor || configuredOutlineCategory == StylizedOutlineCategory.Floor)
+            {
+                return true;
+            }
+
+            if (damageProfile == DestructibleDamageProfile.CornerPillar)
+            {
+                return chunk.Index.x == 0 ||
+                       chunk.Index.x == chunkCounts.x - 1 ||
+                       chunk.Index.y == 0 ||
+                       chunk.Index.y == chunkCounts.y - 1 ||
+                       chunk.Index.z == 0 ||
+                       chunk.Index.z == chunkCounts.z - 1;
+            }
+
+            return false;
+        }
+
+        private void AddOutlineProxyChunkFaces(List<Vector3> vertices, List<int> triangles, Chunk chunk, HashSet<Chunk> outlineSolidChunks)
+        {
+            var inflatedSize = chunk.BaseScale + Vector3.one * (OutlineShellInflation * 2f);
+            for (var i = 0; i < OutlineNeighborOffsets.Length; i++)
+            {
+                var neighborOffset = OutlineNeighborOffsets[i];
+                if (chunksByIndex.TryGetValue(chunk.Index + neighborOffset, out var neighbor))
+                {
+                    if (outlineSolidChunks.Contains(neighbor))
+                    {
+                        continue;
+                    }
+                }
+                else if (!IsOriginalOuterBoundaryFace(chunk, neighborOffset))
+                {
+                    continue;
+                }
+                else
+                {
+                    AddOutlineProxyChunkFace(vertices, triangles, chunk, inflatedSize, neighborOffset, OutlineFaceNormals[i]);
+                    continue;
+                }
+
+                if (neighbor != null && neighbor.Destroyed)
+                {
+                    continue;
+                }
+
+                AddOutlineProxyChunkFace(vertices, triangles, chunk, inflatedSize, neighborOffset, OutlineFaceNormals[i]);
+            }
+        }
+
+        private void AddOutlineProxyChunkFace(List<Vector3> vertices, List<int> triangles, Chunk chunk, Vector3 inflatedSize, Vector3Int neighborOffset, Vector3 normal)
+        {
+            if (ShouldSuppressOutlineProxyFloorContactFace(chunk, neighborOffset))
+            {
+                return;
+            }
+
+            var center = chunk.LocalPosition;
+            var size = inflatedSize;
+            if (ShouldSinkOutlineProxyFloorContactEdge(chunk, normal))
+            {
+                var sink = CalculateWallOutlineFloorSeamSink(size.y);
+                center += Vector3.down * (sink * 0.5f);
+                size.y += sink;
+            }
+
+            AddBoxFace(vertices, triangles, center, size, normal);
+        }
+
+        private bool ShouldSuppressOutlineProxyFloorContactFace(Chunk chunk, Vector3Int neighborOffset)
+        {
+            return damageProfile == DestructibleDamageProfile.CornerPillar &&
+                configuredOutlineCategory != StylizedOutlineCategory.Floor &&
+                chunk.Index.y == 0 &&
+                neighborOffset.y < 0;
+        }
+
+        private bool ShouldSinkOutlineProxyFloorContactEdge(Chunk chunk, Vector3 normal)
+        {
+            return damageProfile == DestructibleDamageProfile.CornerPillar &&
+                configuredOutlineCategory != StylizedOutlineCategory.Floor &&
+                chunk.Index.y == 0 &&
+                Mathf.Abs(normal.y) < 0.5f;
+        }
+
+        private bool IsOriginalOuterBoundaryFace(Chunk chunk, Vector3Int offset)
+        {
+            var index = chunk.Index;
+            if (offset.x < 0)
+            {
+                return index.x == 0;
+            }
+
+            if (offset.x > 0)
+            {
+                return index.x == chunkCounts.x - 1;
+            }
+
+            if (offset.y < 0)
+            {
+                return index.y == 0;
+            }
+
+            if (offset.y > 0)
+            {
+                return index.y == chunkCounts.y - 1;
+            }
+
+            if (offset.z < 0)
+            {
+                return index.z == 0;
+            }
+
+            if (offset.z > 0)
+            {
+                return index.z == chunkCounts.z - 1;
+            }
+
+            return false;
         }
 
         private Material ResolveLargestRendererMaterial(Renderer[] renderers)
@@ -291,6 +666,16 @@ namespace ArenaShooter
                 return intactMaterial;
             }
 
+            if (UsesContourOwnedWallDamage())
+            {
+                return GetContourClippedWallBodyMaterial();
+            }
+
+            return GetUnclippedDestructibleBodyMaterial();
+        }
+
+        private Material GetUnclippedDestructibleBodyMaterial()
+        {
             if (destructibleBodyMaterial != null)
             {
                 return destructibleBodyMaterial;
@@ -311,6 +696,30 @@ namespace ArenaShooter
             destructibleBodyMaterial = new Material(shader) { name = "Destructible Matte Body" };
             SetMaterialColor(destructibleBodyMaterial, color);
             return destructibleBodyMaterial;
+        }
+
+        private Material GetContourClippedWallBodyMaterial()
+        {
+            if (clippedWallBodyMaterial != null)
+            {
+                return clippedWallBodyMaterial;
+            }
+
+            var shader = Shader.Find(ContourClippedWallBodyShaderName);
+            if (shader == null)
+            {
+                shader = Shader.Find("Universal Render Pipeline/Unlit");
+            }
+
+            if (shader == null)
+            {
+                return intactMaterial;
+            }
+
+            var color = GetMaterialBaseColor(intactMaterial, new Color(0.0015f, 0.001f, 0.004f, 1f));
+            clippedWallBodyMaterial = new Material(shader) { name = "Destructible Contour Clipped Wall Body" };
+            SetMaterialColor(clippedWallBodyMaterial, color);
+            return clippedWallBodyMaterial;
         }
 
         private static Color GetMaterialBaseColor(Material material, Color fallback)
@@ -373,6 +782,7 @@ namespace ArenaShooter
                 CalculateCellCount(size.x),
                 CalculateCellCount(size.y),
                 CalculateCellCount(size.z));
+            chunkCounts = counts;
             var cell = new Vector3(size.x / counts.x, size.y / counts.y, size.z / counts.z);
             var origin = -size * 0.5f + cell * 0.5f;
 
@@ -394,6 +804,12 @@ namespace ArenaShooter
                     }
                 }
             }
+        }
+
+        private Vector3 GetWallNormalLocal()
+        {
+            var sourceSize = GetSourceSize();
+            return sourceSize.x <= sourceSize.z ? Vector3.right : Vector3.forward;
         }
 
         private int CalculateCellCount(float size)
@@ -481,26 +897,47 @@ namespace ArenaShooter
                 return;
             }
 
+            if (UsesContourOwnedWallDamage())
+            {
+                RebuildContourOwnedWallMesh();
+                return;
+            }
+
             var vertices = new List<Vector3>();
             var triangles = new List<int>();
             var contourVertices = new List<Vector3>();
             var contourTriangles = new List<int>();
             var visited = new HashSet<Chunk>();
+            var damagePlans = new List<DamageContourPlan>();
+            foreach (var chunk in chunks)
+            {
+                if (!chunk.Destroyed || visited.Contains(chunk))
+                {
+                    continue;
+                }
+
+                var plan = BuildDamageContourPlan(GatherDestroyedContourComponent(chunk, visited));
+                if (plan != null)
+                {
+                    damagePlans.Add(plan);
+                }
+            }
+
             foreach (var chunk in chunks)
             {
                 if (!chunk.Destroyed)
                 {
-                    AddVisibleSurface(vertices, triangles, chunk.LocalPosition, chunk.BaseScale);
-                    continue;
-                }
-
-                if (!visited.Contains(chunk))
-                {
-                    AddMergedDamageGeometry(vertices, triangles, contourVertices, contourTriangles, GatherDestroyedContourComponent(chunk, visited));
+                    AddVisibleChunkSurface(vertices, triangles, chunk);
                 }
             }
 
+            foreach (var plan in damagePlans)
+            {
+                AddPlannedDamageGeometry(vertices, triangles, contourVertices, contourTriangles, plan);
+            }
+
             combinedMeshFilter.sharedMesh = CreateMesh("Combined Destructible Wall Mesh", vertices, new[] { triangles });
+            RebuildOutlineSourceMesh();
             if (damageContourMeshFilter == null)
             {
                 return;
@@ -515,14 +952,697 @@ namespace ArenaShooter
             damageContourMeshFilter.sharedMesh = CreateMesh("Destructible Damage Contour Mesh", contourVertices, new[] { contourTriangles });
         }
 
-        private void AddSolidBlock(List<Vector3> vertices, List<int> triangles, Vector3 center, Vector3 size)
+        private bool UsesContourOwnedWallDamage()
         {
-            AddBoxFace(vertices, triangles, center, size, Vector3.right);
-            AddBoxFace(vertices, triangles, center, size, Vector3.left);
-            AddBoxFace(vertices, triangles, center, size, Vector3.up);
-            AddBoxFace(vertices, triangles, center, size, Vector3.down);
-            AddBoxFace(vertices, triangles, center, size, Vector3.forward);
-            AddBoxFace(vertices, triangles, center, size, Vector3.back);
+            return damageProfile == DestructibleDamageProfile.Wall &&
+                configuredOutlineCategory != StylizedOutlineCategory.Floor;
+        }
+
+        private void AddContourOwnedWallDamage(Vector3 hitPoint)
+        {
+            if (!TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out var bounds))
+            {
+                return;
+            }
+
+            var localHit = transform.InverseTransformPoint(hitPoint);
+            var center = new Vector2(Vector3.Dot(localHit, u), Vector3.Dot(localHit, v));
+            var halfU = Mathf.Max(0.12f, bounds.Width / Mathf.Max(1, CalculateCellCount(bounds.Width)) * 0.5f);
+            var halfV = Mathf.Max(0.12f, bounds.Height / Mathf.Max(1, CalculateCellCount(bounds.Height)) * 0.5f);
+            var stamp = CreateContourOwnedWallDamageStamp(
+                center,
+                normal,
+                u,
+                v,
+                halfN,
+                halfU * 1.08f,
+                halfV * 1.08f,
+                CalculateContourOwnedWallDamageSeed(center));
+            wallDamageStamps.Add(stamp);
+        }
+
+        private DamageStamp CreateContourOwnedWallDamageStamp(
+            Vector2 center,
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float halfN,
+            float radiusU,
+            float radiusV,
+            int seed)
+        {
+            var points = new Vector2[DamageStampSegments];
+            var min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
+            var max = new Vector2(float.NegativeInfinity, float.NegativeInfinity);
+            for (var i = 0; i < DamageStampSegments; i++)
+            {
+                var angle = i / (float)DamageStampSegments * Mathf.PI * 2f;
+                var coarse = Hash01(seed ^ (i * 92837111));
+                var fine = Hash01(seed ^ (i * 689287499) ^ 0x421);
+                var spike = Hash01(seed ^ (i * 283923481) ^ 0x13427);
+                var alternating = (i & 1) == 0 ? -0.38f : 0.34f;
+                var shardSpike = spike > 0.8f ? Mathf.Lerp(0.16f, 0.42f, spike) : 0f;
+                var radiusScale = Mathf.Clamp(
+                    1f + (alternating + Mathf.Lerp(-0.34f, 0.34f, coarse) + Mathf.Lerp(-0.16f, 0.16f, fine) + shardSpike) * DamageContourJaggedness,
+                    0.76f,
+                    1.24f);
+                var point = new Vector2(
+                    center.x + Mathf.Cos(angle) * radiusU * radiusScale,
+                    center.y + Mathf.Sin(angle) * radiusV * radiusScale);
+                points[i] = point;
+                min = Vector2.Min(min, point);
+                max = Vector2.Max(max, point);
+            }
+
+            var stamp = new DamageStamp
+            {
+                Normal = normal,
+                U = u,
+                V = v,
+                Plane = halfN + DamageContourInset,
+                Min = min,
+                Max = max,
+                Points = points
+            };
+            stamp.Opposite = CreateOppositeContourOwnedWallStamp(stamp, normal, halfN);
+            return stamp;
+        }
+
+        private static DamageStamp CreateOppositeContourOwnedWallStamp(DamageStamp source, Vector3 normal, float halfN)
+        {
+            var opposite = new DamageStamp
+            {
+                Normal = -normal,
+                U = source.U,
+                V = source.V,
+                Plane = halfN + DamageContourInset,
+                Min = source.Min,
+                Max = source.Max,
+                Points = source.Points,
+                RenderClosed = source.RenderClosed
+            };
+            opposite.Opposite = source;
+            return opposite;
+        }
+
+        private int CalculateContourOwnedWallDamageSeed(Vector2 center)
+        {
+            unchecked
+            {
+                var hash = 0x62b35a7d;
+                hash = hash * 31 + HashPosition(transform.position);
+                hash = hash * 31 + Mathf.RoundToInt(center.x * 100f);
+                hash = hash * 31 + Mathf.RoundToInt(center.y * 100f);
+                hash = hash * 31 + wallDamageStamps.Count;
+                return hash;
+            }
+        }
+
+        private Vector2 ProjectLocalPointToWallUv(Vector3 localPoint)
+        {
+            if (!TryGetContourOwnedWallBasis(0f, out _, out var u, out var v, out _, out _))
+            {
+                return Vector2.zero;
+            }
+
+            return new Vector2(Vector3.Dot(localPoint, u), Vector3.Dot(localPoint, v));
+        }
+
+        private bool IsPointInsideWallDamageUnion(Vector2 point)
+        {
+            for (var i = 0; i < wallDamageStamps.Count; i++)
+            {
+                var stamp = wallDamageStamps[i];
+                if (stamp != null &&
+                    point.x >= stamp.Min.x &&
+                    point.x <= stamp.Max.x &&
+                    point.y >= stamp.Min.y &&
+                    point.y <= stamp.Max.y &&
+                    IsPointInPolygon(point, stamp.Points))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void UploadWallDamageShaderData()
+        {
+            if (!UsesContourOwnedWallDamage() ||
+                !TryGetContourOwnedWallBasis(0f, out _, out var u, out var v, out _, out _))
+            {
+                return;
+            }
+
+            var stampCount = wallDamageStamps.Count;
+            EnsureWallDamageShaderBufferCapacity(
+                Mathf.Max(1, stampCount),
+                Mathf.Max(1, stampCount * DamageStampSegments));
+
+            var stampBounds = new Vector4[Mathf.Max(1, stampCount)];
+            var stampPoints = new Vector4[Mathf.Max(1, stampCount * DamageStampSegments)];
+            for (var stampIndex = 0; stampIndex < stampCount; stampIndex++)
+            {
+                var stamp = wallDamageStamps[stampIndex];
+                stampBounds[stampIndex] = new Vector4(stamp.Min.x, stamp.Min.y, stamp.Max.x, stamp.Max.y);
+                for (var pointIndex = 0; pointIndex < DamageStampSegments; pointIndex++)
+                {
+                    var point = stamp.Points[pointIndex];
+                    stampPoints[stampIndex * DamageStampSegments + pointIndex] = new Vector4(point.x, point.y, 0f, 0f);
+                }
+            }
+
+            wallDamageStampBoundsBuffer.SetData(stampBounds);
+            wallDamageStampPointsBuffer.SetData(stampPoints);
+            ApplyWallDamagePropertyBlock(combinedRenderer, stampCount, u, v);
+            ApplyWallDamagePropertyBlock(outlineSourceRenderer, stampCount, u, v);
+        }
+
+        private void EnsureWallDamageShaderBufferCapacity(int stampCapacity, int pointCapacity)
+        {
+            if (wallDamageStampBoundsBuffer == null || wallDamageStampBoundsCapacity < stampCapacity)
+            {
+                wallDamageStampBoundsBuffer?.Release();
+                wallDamageStampBoundsCapacity = Mathf.Max(1, stampCapacity);
+                wallDamageStampBoundsBuffer = new ComputeBuffer(wallDamageStampBoundsCapacity, sizeof(float) * 4);
+            }
+
+            if (wallDamageStampPointsBuffer == null || wallDamageStampPointsCapacity < pointCapacity)
+            {
+                wallDamageStampPointsBuffer?.Release();
+                wallDamageStampPointsCapacity = Mathf.Max(1, pointCapacity);
+                wallDamageStampPointsBuffer = new ComputeBuffer(wallDamageStampPointsCapacity, sizeof(float) * 4);
+            }
+        }
+
+        private void ApplyWallDamagePropertyBlock(Renderer renderer, int stampCount, Vector3 u, Vector3 v)
+        {
+            if (renderer == null)
+            {
+                return;
+            }
+
+            wallDamagePropertyBlock ??= new MaterialPropertyBlock();
+            renderer.GetPropertyBlock(wallDamagePropertyBlock);
+            wallDamagePropertyBlock.SetInt(WallDamageClipEnabledId, 1);
+            wallDamagePropertyBlock.SetInt(WallDamageStampCountId, stampCount);
+            wallDamagePropertyBlock.SetInt(WallDamagePointCountId, DamageStampSegments);
+            wallDamagePropertyBlock.SetVector(WallDamageUId, new Vector4(u.x, u.y, u.z, 0f));
+            wallDamagePropertyBlock.SetVector(WallDamageVId, new Vector4(v.x, v.y, v.z, 0f));
+            wallDamagePropertyBlock.SetBuffer(WallDamageStampBoundsId, wallDamageStampBoundsBuffer);
+            wallDamagePropertyBlock.SetBuffer(WallDamageStampPointsId, wallDamageStampPointsBuffer);
+            renderer.SetPropertyBlock(wallDamagePropertyBlock);
+        }
+
+        private void ReleaseWallDamageShaderBuffers()
+        {
+            wallDamageStampBoundsBuffer?.Release();
+            wallDamageStampBoundsBuffer = null;
+            wallDamageStampBoundsCapacity = 0;
+
+            wallDamageStampPointsBuffer?.Release();
+            wallDamageStampPointsBuffer = null;
+            wallDamageStampPointsCapacity = 0;
+        }
+
+        private void RebuildContourOwnedWallMesh()
+        {
+            var vertices = new List<Vector3>();
+            var slabTriangles = new List<int>();
+            var bridgeTriangles = new List<int>();
+            AddContourOwnedWallBodyGeometry(vertices, slabTriangles, 0f);
+
+            var thickness = GetContourOwnedWallContourThickness();
+            var visibleSegments = GetVisibleContourOwnedWallSegments(thickness);
+            if (visibleSegments.Count > 0)
+            {
+                AddContourInteriorBridge(vertices, bridgeTriangles, visibleSegments);
+            }
+
+            combinedMeshFilter.sharedMesh = CreateMesh("Combined Destructible Wall Mesh", vertices, new[] { slabTriangles, bridgeTriangles });
+            if (combinedRenderer != null)
+            {
+                combinedRenderer.sharedMaterials = new[]
+                {
+                    GetContourClippedWallBodyMaterial(),
+                    GetUnclippedDestructibleBodyMaterial()
+                };
+            }
+
+            RebuildOutlineSourceMesh();
+            RebuildContourOwnedWallDamageContourMesh(visibleSegments);
+            UploadWallDamageShaderData();
+        }
+
+        private void RebuildContourOwnedWallDamageContourMesh(List<ContourSegment2D> visibleSegments)
+        {
+            if (damageContourMeshFilter == null)
+            {
+                return;
+            }
+
+            if (!UsesContourOwnedWallDamage() || visibleSegments == null || visibleSegments.Count == 0)
+            {
+                damageContourMeshFilter.sharedMesh = null;
+                return;
+            }
+
+            var vertices = new List<Vector3>();
+            var triangles = new List<int>();
+            AddContourOwnedWallDamageRimSegments(vertices, triangles, visibleSegments);
+            damageContourMeshFilter.sharedMesh = vertices.Count == 0
+                ? null
+                : CreateMesh("Destructible Wall Damage Contour Mesh", vertices, new[] { triangles });
+        }
+
+        private void AddContourOwnedWallDamageRimSegments(List<Vector3> vertices, List<int> triangles, List<ContourSegment2D> visibleSegments)
+        {
+            for (var i = 0; i < visibleSegments.Count; i++)
+            {
+                var segment = visibleSegments[i];
+                if (segment.Stamp == null)
+                {
+                    continue;
+                }
+
+                AddSingleSidedContourSegment(
+                    vertices,
+                    triangles,
+                    DamageStampPointToLocal(segment.Stamp, segment.Start, WallDamageRimDepthBias),
+                    DamageStampPointToLocal(segment.Stamp, segment.End, WallDamageRimDepthBias),
+                    segment.Stamp.Normal,
+                    WallDamageRimThickness);
+
+                AddThroughThicknessDamageRimSegment(vertices, triangles, segment, segment.Start, segment.End);
+                AddThroughThicknessDamageRimSegment(vertices, triangles, segment, segment.End, segment.Start);
+
+                var opposite = segment.Stamp.Opposite;
+                if (opposite == null)
+                {
+                    continue;
+                }
+
+                AddSingleSidedContourSegment(
+                    vertices,
+                    triangles,
+                    DamageStampPointToLocal(opposite, segment.Start, WallDamageRimDepthBias),
+                    DamageStampPointToLocal(opposite, segment.End, WallDamageRimDepthBias),
+                    opposite.Normal,
+                    WallDamageRimThickness);
+            }
+        }
+
+        private void AddThroughThicknessDamageRimSegment(
+            List<Vector3> vertices,
+            List<int> triangles,
+            ContourSegment2D segment,
+            Vector2 point,
+            Vector2 tangentPoint)
+        {
+            var stamp = segment.Stamp;
+            var opposite = stamp != null ? stamp.Opposite : null;
+            if (opposite == null)
+            {
+                return;
+            }
+
+            var tangent2D = tangentPoint - point;
+            var tangent = stamp.U * tangent2D.x + stamp.V * tangent2D.y;
+            if (tangent.sqrMagnitude <= 0.000001f)
+            {
+                return;
+            }
+
+            tangent.Normalize();
+            var halfWidth = tangent * (WallDamageRimThickness * 0.5f);
+            var front = DamageStampPointToLocal(stamp, point, WallDamageRimDepthBias);
+            var back = DamageStampPointToLocal(opposite, point, WallDamageRimDepthBias);
+            var through = back - front;
+            if (through.sqrMagnitude <= 0.000001f)
+            {
+                return;
+            }
+
+            var outward = Vector3.Cross(through, halfWidth);
+            if (outward.sqrMagnitude <= 0.000001f)
+            {
+                outward = stamp.Normal;
+            }
+            else
+            {
+                outward.Normalize();
+            }
+
+            AddQuadOriented(vertices, triangles, front - halfWidth, back - halfWidth, back + halfWidth, front + halfWidth, outward);
+            AddQuadOriented(vertices, triangles, front - halfWidth, front + halfWidth, back + halfWidth, back - halfWidth, -outward);
+        }
+
+        private void AddContourOwnedWallBodyGeometry(List<Vector3> vertices, List<int> triangles, float shellInflation)
+        {
+            if (!TryGetContourOwnedWallBasis(shellInflation, out var normal, out var u, out var v, out var halfN, out var bounds))
+            {
+                return;
+            }
+
+            AddContourOwnedWallBodyGeometry(vertices, triangles, normal, u, v, halfN, bounds);
+        }
+
+        private void AddContourOwnedWallOutlineSourceGeometry(List<Vector3> vertices, List<int> triangles)
+        {
+            if (!TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out var bounds))
+            {
+                return;
+            }
+
+            var outlineBounds = SinkContourOwnedWallOutlineFloorEdge(bounds, u, v);
+            var outlineHalfN = halfN + WallOutlineProxyDepthOffset;
+            AddContourOwnedWallPlaneQuad(
+                vertices,
+                triangles,
+                normal,
+                u,
+                v,
+                outlineHalfN,
+                outlineBounds.MinU,
+                outlineBounds.MaxU,
+                outlineBounds.MinV,
+                outlineBounds.MaxV);
+            AddContourOwnedWallPlaneQuad(
+                vertices,
+                triangles,
+                -normal,
+                u,
+                v,
+                outlineHalfN,
+                outlineBounds.MinU,
+                outlineBounds.MaxU,
+                outlineBounds.MinV,
+                outlineBounds.MaxV);
+        }
+
+        private void AddContourOwnedWallBodyGeometry(
+            List<Vector3> vertices,
+            List<int> triangles,
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float halfN,
+            DamageComponentPlaneBounds bounds)
+        {
+            AddContourOwnedWallPlaneQuad(vertices, triangles, normal, u, v, halfN, bounds.MinU, bounds.MaxU, bounds.MinV, bounds.MaxV);
+            AddContourOwnedWallPlaneQuad(vertices, triangles, -normal, u, v, halfN, bounds.MinU, bounds.MaxU, bounds.MinV, bounds.MaxV);
+            AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MinU, bounds.MinV, bounds.MaxV, true, -u);
+            AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MaxU, bounds.MinV, bounds.MaxV, true, u);
+            AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MinV, bounds.MinU, bounds.MaxU, false, -v);
+            AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MaxV, bounds.MinU, bounds.MaxU, false, v);
+        }
+
+        private static DamageComponentPlaneBounds SinkContourOwnedWallOutlineFloorEdge(DamageComponentPlaneBounds bounds, Vector3 u, Vector3 v)
+        {
+            var uVertical = Vector3.Dot(u, Vector3.up);
+            if (Mathf.Abs(uVertical) > 0.5f)
+            {
+                var sink = CalculateWallOutlineFloorSeamSink(bounds.Width);
+                return uVertical > 0f
+                    ? new DamageComponentPlaneBounds(bounds.MinU - sink, bounds.MaxU, bounds.MinV, bounds.MaxV)
+                    : new DamageComponentPlaneBounds(bounds.MinU, bounds.MaxU + sink, bounds.MinV, bounds.MaxV);
+            }
+
+            var vVertical = Vector3.Dot(v, Vector3.up);
+            if (Mathf.Abs(vVertical) > 0.5f)
+            {
+                var sink = CalculateWallOutlineFloorSeamSink(bounds.Height);
+                return vVertical > 0f
+                    ? new DamageComponentPlaneBounds(bounds.MinU, bounds.MaxU, bounds.MinV - sink, bounds.MaxV)
+                    : new DamageComponentPlaneBounds(bounds.MinU, bounds.MaxU, bounds.MinV, bounds.MaxV + sink);
+            }
+
+            return bounds;
+        }
+
+        private static float CalculateWallOutlineFloorSeamSink(float verticalSpan)
+        {
+            return Mathf.Max(MinimumWallOutlineFloorSeamSink, Mathf.Abs(verticalSpan) * 1.1f, OutlineShellInflation * 4f);
+        }
+
+        private bool TryGetContourOwnedWallBasis(
+            float shellInflation,
+            out Vector3 normal,
+            out Vector3 u,
+            out Vector3 v,
+            out float halfN,
+            out DamageComponentPlaneBounds bounds)
+        {
+            normal = Vector3.forward;
+            u = Vector3.right;
+            v = Vector3.up;
+            halfN = 0f;
+            bounds = default;
+            if (damageProfile != DestructibleDamageProfile.Wall || configuredOutlineCategory == StylizedOutlineCategory.Floor)
+            {
+                return false;
+            }
+
+            var sourceSize = GetSourceSize() + Vector3.one * (shellInflation * 2f);
+            GetFaceBasis(GetWallNormalLocal(), sourceSize, out normal, out u, out v, out halfN, out var halfU, out var halfV);
+            bounds = new DamageComponentPlaneBounds(-halfU, halfU, -halfV, halfV);
+            return bounds.IsValid && halfN > 0f;
+        }
+
+        private float GetContourOwnedWallContourThickness()
+        {
+            var sourceSize = GetSourceSize();
+            var smallest = Mathf.Min(sourceSize.x, Mathf.Min(sourceSize.y, sourceSize.z));
+            return Mathf.Clamp(smallest * 0.08f, 0.018f, 0.05f);
+        }
+
+        private List<ContourSegment2D> GetVisibleContourOwnedWallSegments(float thickness)
+        {
+            var result = new List<ContourSegment2D>();
+            if (wallDamageStamps.Count == 0 ||
+                !TryGetContourOwnedWallBasis(0f, out _, out _, out _, out _, out var bounds))
+            {
+                return result;
+            }
+
+            var rawSegments = BuildStampUnionDamageSegments(wallDamageStamps, thickness);
+            for (var i = 0; i < rawSegments.Count; i++)
+            {
+                var segment = rawSegments[i];
+                if (TryClipSegmentToBounds(segment.Start, segment.End, bounds, out var clippedStart, out var clippedEnd))
+                {
+                    result.Add(new ContourSegment2D(segment.Stamp, clippedStart, clippedEnd));
+                }
+            }
+
+            return result;
+        }
+
+        private void AddContourOwnedWallPlaneQuad(
+            List<Vector3> vertices,
+            List<int> triangles,
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float plane,
+            float minU,
+            float maxU,
+            float minV,
+            float maxV)
+        {
+            AddQuadOriented(
+                vertices,
+                triangles,
+                normal * plane + u * minU + v * minV,
+                normal * plane + u * maxU + v * minV,
+                normal * plane + u * maxU + v * maxV,
+                normal * plane + u * minU + v * maxV,
+                normal);
+        }
+
+        private void AddContourOwnedWallFullOuterSide(
+            List<Vector3> vertices,
+            List<int> triangles,
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float halfN,
+            float sideCoordinate,
+            float minAlong,
+            float maxAlong,
+            bool uSide,
+            Vector3 outward)
+        {
+            var localA = uSide ? u * sideCoordinate + v * minAlong : u * minAlong + v * sideCoordinate;
+            var localB = uSide ? u * sideCoordinate + v * maxAlong : u * maxAlong + v * sideCoordinate;
+            AddQuadOriented(
+                vertices,
+                triangles,
+                normal * halfN + localA,
+                normal * halfN + localB,
+                -normal * halfN + localB,
+                -normal * halfN + localA,
+                outward);
+        }
+
+        private static bool TryClipSegmentToBounds(Vector2 start, Vector2 end, DamageComponentPlaneBounds bounds, out Vector2 clippedStart, out Vector2 clippedEnd)
+        {
+            clippedStart = start;
+            clippedEnd = end;
+            var delta = end - start;
+            var t0 = 0f;
+            var t1 = 1f;
+            if (!ClipLineTest(-delta.x, start.x - bounds.MinU, ref t0, ref t1) ||
+                !ClipLineTest(delta.x, bounds.MaxU - start.x, ref t0, ref t1) ||
+                !ClipLineTest(-delta.y, start.y - bounds.MinV, ref t0, ref t1) ||
+                !ClipLineTest(delta.y, bounds.MaxV - start.y, ref t0, ref t1) ||
+                t1 - t0 <= 0.0001f)
+            {
+                return false;
+            }
+
+            clippedStart = start + delta * t0;
+            clippedEnd = start + delta * t1;
+            return true;
+        }
+
+        private static bool ClipLineTest(float p, float q, ref float t0, ref float t1)
+        {
+            if (Mathf.Abs(p) <= 0.000001f)
+            {
+                return q >= 0f;
+            }
+
+            var r = q / p;
+            if (p < 0f)
+            {
+                if (r > t1)
+                {
+                    return false;
+                }
+
+                if (r > t0)
+                {
+                    t0 = r;
+                }
+
+                return true;
+            }
+
+            if (r < t0)
+            {
+                return false;
+            }
+
+            if (r < t1)
+            {
+                t1 = r;
+            }
+
+            return true;
+        }
+
+        private bool TryResolveContourOwnedWallVault(
+            Vector3 playerPosition,
+            Vector3 localPlayer,
+            Vector3 localForward,
+            Vector3 wallNormal,
+            Vector3 sideNormal,
+            float playerRadius,
+            float playerHeight,
+            out PlayerVaultSolution solution)
+        {
+            solution = default;
+            if (wallDamageStamps.Count == 0 ||
+                playerHeight < 1.1f ||
+                !TryGetContourOwnedWallBasis(0f, out _, out var u, out var v, out var halfN, out var bounds))
+            {
+                return false;
+            }
+
+            var thickness = GetContourOwnedWallContourThickness();
+            var visibleSegments = GetVisibleContourOwnedWallSegments(thickness);
+            if (visibleSegments.Count == 0)
+            {
+                return false;
+            }
+
+            var groups = BuildContourSegmentGroups(visibleSegments, Mathf.Max(0.002f, thickness * 0.35f));
+            var verticalIsU = Mathf.Abs(u.y) > Mathf.Abs(v.y);
+            var wallBottom = -GetSourceSize().y * 0.5f;
+            var bestScore = float.NegativeInfinity;
+            var bestEntry = Vector3.zero;
+            var bestExit = Vector3.zero;
+            var bestApex = Vector3.zero;
+            for (var i = 0; i < groups.Count; i++)
+            {
+                var group = groups[i];
+                var width = verticalIsU ? group.Span.y : group.Span.x;
+                var height = verticalIsU ? group.Span.x : group.Span.y;
+                var bottom = verticalIsU ? group.Min.x : group.Min.y;
+                var top = verticalIsU ? group.Max.x : group.Max.y;
+                if (width < MinimumVaultOpeningWidth ||
+                    height < MinimumVaultOpeningHeight ||
+                    bottom - wallBottom > MaximumVaultOpeningBottom ||
+                    top - wallBottom < MinimumVaultOpeningTop)
+                {
+                    continue;
+                }
+
+                var center = group.Centroid;
+                var centerLocal = u * center.x + v * center.y;
+                var openingCenterWorld = transform.TransformPoint(centerLocal);
+                var toOpening = openingCenterWorld - playerPosition;
+                toOpening.y = 0f;
+                var approachDistance = toOpening.magnitude;
+                if (approachDistance > MaximumVaultApproachDistance || approachDistance <= 0.05f)
+                {
+                    continue;
+                }
+
+                var worldForward = transform.TransformDirection(localForward);
+                worldForward.y = 0f;
+                worldForward.Normalize();
+                var facing = Vector3.Dot(worldForward, toOpening / approachDistance);
+                if (facing < 0.42f)
+                {
+                    continue;
+                }
+
+                var lateralMiss = Vector3.Cross(worldForward, toOpening).magnitude;
+                if (lateralMiss > Mathf.Max(0.8f, width * 0.65f))
+                {
+                    continue;
+                }
+
+                var localEntry = centerLocal + sideNormal * (halfN + playerRadius * 0.75f);
+                var localExit = centerLocal - sideNormal * (halfN + playerRadius + 0.5f);
+                var entry = transform.TransformPoint(localEntry);
+                var exit = transform.TransformPoint(localExit);
+                entry.y = playerPosition.y;
+                exit.y = playerPosition.y;
+                var apex = transform.TransformPoint(centerLocal + Vector3.up * Mathf.Max(0.35f, height * 0.32f));
+                apex.y = Mathf.Max(apex.y, playerPosition.y + 0.52f);
+                var score = width * 1.6f + height + facing - approachDistance * 0.2f;
+                if (score <= bestScore)
+                {
+                    continue;
+                }
+
+                bestScore = score;
+                bestEntry = entry;
+                bestExit = exit;
+                bestApex = apex;
+            }
+
+            if (bestScore <= float.NegativeInfinity * 0.5f)
+            {
+                return false;
+            }
+
+            solution = new PlayerVaultSolution(bestEntry, bestExit, bestApex, surfaceCollider);
+            return true;
         }
 
         private List<Chunk> GatherDestroyedContourComponent(Chunk start, HashSet<Chunk> visited)
@@ -562,35 +1682,92 @@ namespace ArenaShooter
             queue.Enqueue(neighbor);
         }
 
-        private void AddMergedDamageGeometry(
+        private DamageContourPlan BuildDamageContourPlan(List<Chunk> component)
+        {
+            if (component == null || component.Count == 0)
+            {
+                return null;
+            }
+
+            var contourChunks = new List<Chunk>();
+            foreach (var chunk in component)
+            {
+                EnsureDamageStamp(chunk);
+                contourChunks.Add(chunk);
+            }
+
+            if (contourChunks.Count == 0)
+            {
+                return null;
+            }
+
+            if (!HasContourAgainstSurvivingMaterial(contourChunks))
+            {
+                return null;
+            }
+
+            var half = contourChunks[0].BaseScale * 0.5f;
+            var thickness = Mathf.Clamp(Mathf.Min(half.x, half.y, half.z) * 0.08f, 0.018f, 0.05f);
+            var frontStamps = CollectDamageStamps(contourChunks, false);
+            var frontSegments = BuildStampUnionDamageSegments(frontStamps, thickness);
+
+            if (frontSegments.Count == 0)
+            {
+                return null;
+            }
+
+            return new DamageContourPlan(
+                frontSegments,
+                thickness);
+        }
+
+        private void AddPlannedDamageGeometry(
             List<Vector3> bodyVertices,
             List<int> bodyTriangles,
             List<Vector3> contourVertices,
             List<int> contourTriangles,
-            List<Chunk> component)
+            DamageContourPlan plan)
         {
-            if (component == null || component.Count == 0)
+            if (plan == null)
             {
                 return;
             }
 
-            foreach (var chunk in component)
-            {
-                EnsureDamageStamp(chunk);
-            }
-
-            var half = component[0].BaseScale * 0.5f;
-            var thickness = Mathf.Clamp(Mathf.Min(half.x, half.y, half.z) * 0.08f, 0.018f, 0.05f);
-            var frontStamps = CollectDamageStamps(component, false);
-            var frontSegments = BuildStampUnionDamageSegments(frontStamps, thickness);
-            AddDamageContourSegments(contourVertices, contourTriangles, frontSegments, thickness);
-
             if (damageProfile != DestructibleDamageProfile.CornerPillar)
             {
-                AddContourInteriorBridge(bodyVertices, bodyTriangles, frontSegments);
+                AddContourInteriorBridge(bodyVertices, bodyTriangles, plan.FrontSegments);
             }
 
-            AddOppositeDamageContourSegments(contourVertices, contourTriangles, frontSegments, thickness);
+            AddDamageContourSegments(contourVertices, contourTriangles, plan.FrontSegments, plan.Thickness);
+            AddOppositeDamageContourSegments(contourVertices, contourTriangles, plan.FrontSegments, plan.Thickness);
+        }
+
+        private bool HasContourAgainstSurvivingMaterial(List<Chunk> component)
+        {
+            if (component == null || component.Count == 0)
+            {
+                return false;
+            }
+
+            GetPlaneNeighborDirections(component[0].LastLocalNormal, out var right, out var up);
+            for (var i = 0; i < component.Count; i++)
+            {
+                var chunk = component[i];
+                if (HasIntactNeighbor(chunk, right) ||
+                    HasIntactNeighbor(chunk, -right) ||
+                    HasIntactNeighbor(chunk, up) ||
+                    HasIntactNeighbor(chunk, -up))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool HasIntactNeighbor(Chunk chunk, Vector3Int offset)
+        {
+            return chunksByIndex.TryGetValue(chunk.Index + offset, out var neighbor) && !neighbor.Destroyed;
         }
 
         private List<DamageStamp> CollectDamageStamps(List<Chunk> component, bool oppositeFace)
@@ -758,11 +1935,6 @@ namespace ArenaShooter
             }
 
             return Vector2.right;
-        }
-
-        private void AddStampUnionDamageContour(List<Vector3> vertices, List<int> triangles, List<DamageStamp> stamps, float thickness)
-        {
-            AddDamageContourSegments(vertices, triangles, BuildStampUnionDamageSegments(stamps, thickness), thickness);
         }
 
         private List<ContourSegment2D> BuildStampUnionDamageSegments(List<DamageStamp> stamps, float thickness)
@@ -1200,6 +2372,11 @@ namespace ArenaShooter
             return stamp.Normal * stamp.Plane + stamp.U * point.x + stamp.V * point.y;
         }
 
+        private static Vector3 DamageStampPointToLocal(DamageStamp stamp, Vector2 point, float planeOffset)
+        {
+            return stamp.Normal * (stamp.Plane + planeOffset) + stamp.U * point.x + stamp.V * point.y;
+        }
+
         private void AddContourSegment(List<Vector3> vertices, List<int> triangles, Vector3 start, Vector3 end, Vector3 normal, float thickness)
         {
             var direction = end - start;
@@ -1221,6 +2398,26 @@ namespace ArenaShooter
             AddQuadOriented(vertices, triangles, start - halfWidth, start + halfWidth, end + halfWidth, end - halfWidth, -normal);
         }
 
+        private void AddSingleSidedContourSegment(List<Vector3> vertices, List<int> triangles, Vector3 start, Vector3 end, Vector3 normal, float thickness)
+        {
+            var direction = end - start;
+            if (direction.sqrMagnitude <= 0.000001f)
+            {
+                return;
+            }
+
+            direction.Normalize();
+            var side = Vector3.Cross(normal, direction);
+            if (side.sqrMagnitude <= 0.000001f)
+            {
+                return;
+            }
+
+            side.Normalize();
+            var halfWidth = side * (thickness * 0.5f);
+            AddQuadOriented(vertices, triangles, start - halfWidth, end - halfWidth, end + halfWidth, start + halfWidth, normal);
+        }
+
         private void AddInteriorBridgeSegment(List<Vector3> vertices, List<int> triangles, Vector3 frontStart, Vector3 frontEnd, Vector3 backStart, Vector3 backEnd)
         {
             var normal = Vector3.Cross(frontEnd - frontStart, backStart - frontStart);
@@ -1234,8 +2431,10 @@ namespace ArenaShooter
             AddQuadOriented(vertices, triangles, frontStart, backStart, backEnd, frontEnd, -normal);
         }
 
-        private void AddVisibleSurface(List<Vector3> vertices, List<int> triangles, Vector3 center, Vector3 size)
+        private void AddVisibleChunkSurface(List<Vector3> vertices, List<int> triangles, Chunk chunk)
         {
+            var center = chunk.LocalPosition;
+            var size = chunk.BaseScale;
             if (configuredOutlineCategory == StylizedOutlineCategory.Floor)
             {
                 AddBoxFace(vertices, triangles, center, size, Vector3.up);
@@ -1245,19 +2444,49 @@ namespace ArenaShooter
             var half = size * 0.5f;
             if (half.x <= half.y && half.x <= half.z)
             {
-                AddBoxFace(vertices, triangles, center, size, Vector3.right);
-                AddBoxFace(vertices, triangles, center, size, Vector3.left);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(1, 0, 0), Vector3.right);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(-1, 0, 0), Vector3.left);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(0, 1, 0), Vector3.up);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(0, -1, 0), Vector3.down);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(0, 0, 1), Vector3.forward);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(0, 0, -1), Vector3.back);
                 return;
             }
 
             if (half.z <= half.x && half.z <= half.y)
             {
-                AddBoxFace(vertices, triangles, center, size, Vector3.forward);
-                AddBoxFace(vertices, triangles, center, size, Vector3.back);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(0, 0, 1), Vector3.forward);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(0, 0, -1), Vector3.back);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(1, 0, 0), Vector3.right);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(-1, 0, 0), Vector3.left);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(0, 1, 0), Vector3.up);
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, new Vector3Int(0, -1, 0), Vector3.down);
                 return;
             }
 
-            AddBoxFace(vertices, triangles, center, size, Vector3.forward);
+            for (var i = 0; i < OutlineNeighborOffsets.Length; i++)
+            {
+                AddVisibleChunkFaceIfExposed(vertices, triangles, chunk, OutlineNeighborOffsets[i], OutlineFaceNormals[i]);
+            }
+        }
+
+        private void AddVisibleChunkFaceIfExposed(List<Vector3> vertices, List<int> triangles, Chunk chunk, Vector3Int offset, Vector3 normal)
+        {
+            if (chunksByIndex.TryGetValue(chunk.Index + offset, out var neighbor))
+            {
+                if (!neighbor.Destroyed)
+                {
+                    return;
+                }
+
+                AddBoxFace(vertices, triangles, chunk.LocalPosition, chunk.BaseScale, normal);
+                return;
+            }
+
+            if (IsOriginalOuterBoundaryFace(chunk, offset))
+            {
+                AddBoxFace(vertices, triangles, chunk.LocalPosition, chunk.BaseScale, normal);
+            }
         }
 
         private static int HashIndex(Vector3Int index)
@@ -1369,6 +2598,11 @@ namespace ArenaShooter
         private Mesh CreateMesh(string meshName, List<Vector3> vertices, List<int>[] submeshes)
         {
             var mesh = new Mesh { name = meshName };
+            if (vertices.Count > 65000)
+            {
+                mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            }
+
             mesh.SetVertices(vertices);
             mesh.subMeshCount = submeshes.Length;
             for (var i = 0; i < submeshes.Length; i++)
@@ -1484,10 +2718,9 @@ namespace ArenaShooter
         {
             if (damageContourMaterial == null)
             {
-                var category = configuredOutlineCategory == StylizedOutlineCategory.Floor
-                    ? StylizedOutlineCategory.Floor
-                    : StylizedOutlineCategory.Wall;
-                var color = DroidRenderSetup.ResolveEffectiveOutlineColor(category);
+                var color = configuredOutlineCategory == StylizedOutlineCategory.Floor
+                    ? DroidRenderSetup.ResolveEffectiveOutlineColor(StylizedOutlineCategory.Floor)
+                    : DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Wall);
                 damageContourMaterial = CreateUnlitDamageContourMaterial("Destructible Neon Damage Contour", color);
             }
 
