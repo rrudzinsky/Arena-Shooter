@@ -86,6 +86,7 @@ namespace ArenaShooter
         private static readonly Sprite[] cornerDroidPoseSprites = new Sprite[CornerDroidPoseResourcePaths.Length];
         private static readonly Sprite[] cornerDroidPoseOccluderSprites = new Sprite[CornerDroidPoseResourcePaths.Length];
         private static float startupInputSuppressedUntil = -1f;
+        private static bool startupInputReleaseRequired;
 
         private void Start()
         {
@@ -97,6 +98,7 @@ namespace ArenaShooter
             startupInputSuppressedUntil = Mathf.Max(
                 startupInputSuppressedUntil,
                 Time.realtimeSinceStartup + StartupInputSuppressSeconds);
+            startupInputReleaseRequired = true;
         }
 
         private void OnEnable()
@@ -675,7 +677,7 @@ namespace ArenaShooter
                 return;
             }
 
-            if (Time.realtimeSinceStartup < startupInputSuppressedUntil)
+            if (IsStartupInputSuppressed())
             {
                 return;
             }
@@ -852,7 +854,7 @@ namespace ArenaShooter
 
             foreach (var gamepad in Gamepad.all)
             {
-                if (gamepad.buttonSouth.wasPressedThisFrame || gamepad.buttonEast.wasPressedThisFrame || gamepad.startButton.wasPressedThisFrame)
+                if (gamepad.buttonSouth.wasPressedThisFrame || gamepad.startButton.wasPressedThisFrame)
                 {
                     return true;
                 }
@@ -879,7 +881,6 @@ namespace ArenaShooter
                 || Input.GetKeyDown(KeyCode.KeypadEnter)
                 || Input.GetKeyDown(KeyCode.Space)
                 || Input.GetKeyDown(KeyCode.JoystickButton0)
-                || Input.GetKeyDown(KeyCode.JoystickButton1)
                 || Input.GetKeyDown(KeyCode.JoystickButton7);
 #endif
 
@@ -911,14 +912,66 @@ namespace ArenaShooter
             var name = button.name.ToLowerInvariant();
             var displayName = button.displayName.ToLowerInvariant();
             return name.Contains("buttonsouth")
-                || name.Contains("buttoneast")
                 || name.Contains("start")
                 || name == "a"
-                || name == "b"
                 || displayName == "a"
-                || displayName == "b"
-                || displayName == "cross"
-                || displayName == "circle";
+                || displayName == "cross";
+        }
+
+        private static bool IsStartupInputSuppressed()
+        {
+            if (Time.realtimeSinceStartup < startupInputSuppressedUntil)
+            {
+                return true;
+            }
+
+            if (!startupInputReleaseRequired)
+            {
+                return false;
+            }
+
+            if (IsAnyStartupBlockedInputHeld())
+            {
+                return true;
+            }
+
+            startupInputReleaseRequired = false;
+            return false;
+        }
+
+        private static bool IsAnyStartupBlockedInputHeld()
+        {
+            var keyboard = Keyboard.current;
+            if (keyboard != null &&
+                (keyboard.enterKey.isPressed ||
+                 keyboard.numpadEnterKey.isPressed ||
+                 keyboard.spaceKey.isPressed ||
+                 keyboard.escapeKey.isPressed))
+            {
+                return true;
+            }
+
+            foreach (var gamepad in Gamepad.all)
+            {
+                if (gamepad.buttonSouth.isPressed ||
+                    gamepad.buttonEast.isPressed ||
+                    gamepad.startButton.isPressed)
+                {
+                    return true;
+                }
+            }
+
+#if ENABLE_LEGACY_INPUT_MANAGER
+            return Input.GetKey(KeyCode.Return)
+                || Input.GetKey(KeyCode.KeypadEnter)
+                || Input.GetKey(KeyCode.Space)
+                || Input.GetKey(KeyCode.Escape)
+                || Input.GetKey(KeyCode.JoystickButton0)
+                || Input.GetKey(KeyCode.JoystickButton1)
+                || Input.GetKey(KeyCode.JoystickButton7);
+#else
+            return false;
+#endif
         }
 
         private bool TryHandlePointerClick()

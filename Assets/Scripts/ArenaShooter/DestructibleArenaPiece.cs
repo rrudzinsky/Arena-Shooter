@@ -32,6 +32,38 @@ namespace ArenaShooter
         private const float MinimumVaultOpeningTop = 0.78f;
         private const float MaximumVaultApproachDistance = 2.25f;
         private const float MaximumVaultPlaneDistance = 1.25f;
+        private const int MaxUnsupportedIslandSpraysPerDamage = 18;
+        private const float UnsupportedIslandSpraySourceClearance = 0.035f;
+        private const float UnsupportedIslandSprayMinLifetime = 0.42f;
+        private const float UnsupportedIslandSprayMaxLifetime = 0.7f;
+        private const float UnsupportedIslandSprayMinSpeed = 2.1f;
+        private const float UnsupportedIslandSprayMaxSpeed = 4.6f;
+        private const float UnsupportedIslandSprayLateralSpread = 0.7f;
+        private const float UnsupportedIslandSprayChipMinSize = 0.035f;
+        private const float UnsupportedIslandSprayChipMaxSize = 0.12f;
+        private const int UnsupportedIslandCleanupPasses = 6;
+        private const float UnsupportedIslandScanTargetCellSize = 0.045f;
+        private const int UnsupportedIslandScanMaxCellsPerAxis = 512;
+        private const float UnsupportedIslandSupportBridgeWidth = 0.16f;
+        private const float UnsupportedIslandPerimeterSupportMinSpan = 0.48f;
+        private const float UnsupportedIslandCleanupPadding = 0.028f;
+        private const int UnsupportedIslandMinimumSolidCellSamples = 2;
+        private const float UnsupportedIslandSprayMinimumArea = 0.006f;
+        private const int UnsupportedIslandSprayMinChips = 3;
+        private const int UnsupportedIslandSprayMaxChips = 7;
+        private const int WallHitSprayMinChips = 5;
+        private const int WallHitSprayMaxChips = 9;
+        private const float UnsupportedIslandCellSampleInset = 0.32f;
+        private const float OpenContourShardSupportProbeScale = 1.6f;
+        private const float OpenContourShardBoundaryWidthScale = 0.72f;
+        private const float OpenContourShardMinimumSegmentLength = 0.015f;
+        private static readonly Vector2Int[] IslandScanNeighborOffsets =
+        {
+            new(1, 0),
+            new(-1, 0),
+            new(0, 1),
+            new(0, -1)
+        };
         private static readonly Vector3Int[] OutlineNeighborOffsets =
         {
             Vector3Int.right,
@@ -56,12 +88,13 @@ namespace ArenaShooter
         private readonly List<Chunk> chunks = new();
         private readonly List<DamageStamp> wallDamageStamps = new();
         private static readonly int WallDamageStampCountId = Shader.PropertyToID("_WallDamageStampCount");
-        private static readonly int WallDamagePointCountId = Shader.PropertyToID("_WallDamagePointCount");
         private static readonly int WallDamageClipEnabledId = Shader.PropertyToID("_WallDamageClipEnabled");
         private static readonly int WallDamageUId = Shader.PropertyToID("_WallDamageU");
         private static readonly int WallDamageVId = Shader.PropertyToID("_WallDamageV");
         private static readonly int WallDamageStampBoundsId = Shader.PropertyToID("_WallDamageStampBounds");
         private static readonly int WallDamageStampPointsId = Shader.PropertyToID("_WallDamageStampPoints");
+        private static readonly int WallDamageStampPointOffsetsId = Shader.PropertyToID("_WallDamageStampPointOffsets");
+        private static readonly int WallDamageStampPointCountsId = Shader.PropertyToID("_WallDamageStampPointCounts");
         private Vector3 configuredSize;
         private Material configuredIntactMaterial;
         private Material intactMaterial;
@@ -71,9 +104,13 @@ namespace ArenaShooter
         private Material outlineProxyMaterial;
         private ComputeBuffer wallDamageStampBoundsBuffer;
         private ComputeBuffer wallDamageStampPointsBuffer;
+        private ComputeBuffer wallDamageStampPointOffsetsBuffer;
+        private ComputeBuffer wallDamageStampPointCountsBuffer;
         private MaterialPropertyBlock wallDamagePropertyBlock;
         private int wallDamageStampBoundsCapacity;
         private int wallDamageStampPointsCapacity;
+        private int wallDamageStampPointOffsetsCapacity;
+        private int wallDamageStampPointCountsCapacity;
         private StylizedOutlineCategory configuredOutlineCategory = StylizedOutlineCategory.None;
         private DestructibleDamageProfile damageProfile = DestructibleDamageProfile.Wall;
         private Vector3 configuredBiteDirectionLocal = Vector3.zero;
@@ -126,6 +163,7 @@ namespace ArenaShooter
             public Vector2[] Points;
             public DamageStamp Opposite;
             public bool RenderClosed = true;
+            public bool RenderContour = true;
         }
 
         private readonly struct ContourSegment2D
@@ -137,6 +175,18 @@ namespace ArenaShooter
             public ContourSegment2D(DamageStamp stamp, Vector2 start, Vector2 end)
             {
                 Stamp = stamp;
+                Start = start;
+                End = end;
+            }
+        }
+
+        private readonly struct BoundaryEdge
+        {
+            public readonly Vector2Int Start;
+            public readonly Vector2Int End;
+
+            public BoundaryEdge(Vector2Int start, Vector2Int end)
+            {
                 Start = start;
                 End = end;
             }
@@ -169,6 +219,7 @@ namespace ArenaShooter
             public Vector2 Min = new(float.PositiveInfinity, float.PositiveInfinity);
             public Vector2 Max = new(float.NegativeInfinity, float.NegativeInfinity);
             public Vector2 MidpointSum;
+            public float TotalLength;
 
             public Vector2 Centroid => SegmentIndexes.Count > 0 ? MidpointSum / SegmentIndexes.Count : Vector2.zero;
             public Vector2 Span => Max - Min;
@@ -190,6 +241,163 @@ namespace ArenaShooter
                     }
 
                     return true;
+                }
+            }
+        }
+
+        private sealed class UnsupportedIslandScanGrid
+        {
+            public readonly DamageComponentPlaneBounds Bounds;
+            public readonly int Columns;
+            public readonly int Rows;
+            public readonly int SupportRadiusCells;
+            public readonly float StepU;
+            public readonly float StepV;
+            public readonly bool[] Solid;
+            public readonly bool[] SupportCore;
+
+            public UnsupportedIslandScanGrid(
+                DamageComponentPlaneBounds bounds,
+                int columns,
+                int rows,
+                int supportRadiusCells,
+                float stepU,
+                float stepV,
+                bool[] solid,
+                bool[] supportCore)
+            {
+                Bounds = bounds;
+                Columns = columns;
+                Rows = rows;
+                SupportRadiusCells = supportRadiusCells;
+                StepU = stepU;
+                StepV = stepV;
+                Solid = solid;
+                SupportCore = supportCore;
+            }
+
+            public int Count => Solid.Length;
+
+            public int Index(int x, int y)
+            {
+                return y * Columns + x;
+            }
+
+            public int CellX(int index)
+            {
+                return index % Columns;
+            }
+
+            public int CellY(int index)
+            {
+                return index / Columns;
+            }
+
+            public bool ContainsCell(int x, int y)
+            {
+                return x >= 0 && x < Columns && y >= 0 && y < Rows;
+            }
+
+            public bool IsPerimeterCell(int x, int y)
+            {
+                return x == 0 || y == 0 || x == Columns - 1 || y == Rows - 1;
+            }
+
+            public Vector2 CellCenter(int x, int y)
+            {
+                return new Vector2(
+                    Bounds.MinU + (x + 0.5f) * StepU,
+                    Bounds.MinV + (y + 0.5f) * StepV);
+            }
+
+            public Vector2 CornerToUv(Vector2Int corner)
+            {
+                return new Vector2(
+                    Bounds.MinU + corner.x * StepU,
+                    Bounds.MinV + corner.y * StepV);
+            }
+        }
+
+        private sealed class UnsupportedWallIsland
+        {
+            public readonly List<Vector2> Points;
+            public readonly Vector2 Centroid;
+            public readonly Vector2 Min;
+            public readonly Vector2 Max;
+            public readonly float Area;
+            public readonly bool RequiresSpray;
+
+            public UnsupportedWallIsland(List<Vector2> points, Vector2 centroid, Vector2 min, Vector2 max, float area)
+                : this(points, centroid, min, max, area, true)
+            {
+            }
+
+            public UnsupportedWallIsland(List<Vector2> points, Vector2 centroid, Vector2 min, Vector2 max, float area, bool requiresSpray)
+            {
+                Points = points;
+                Centroid = centroid;
+                Min = min;
+                Max = max;
+                Area = area;
+                RequiresSpray = requiresSpray;
+            }
+        }
+
+        private sealed class UnsupportedIslandSprayChipAnimation : MonoBehaviour
+        {
+            private Vector3 startPosition;
+            private Vector3 velocity;
+            private Vector3 spinAxis;
+            private Vector3 startScale;
+            private float angularSpeed;
+            private float duration;
+            private float elapsed;
+
+            public void Initialize(Vector3 initialVelocity, Vector3 initialSpinAxis, float spinDegreesPerSecond, float lifetimeSeconds)
+            {
+                startPosition = transform.position;
+                velocity = initialVelocity;
+                spinAxis = initialSpinAxis.sqrMagnitude > 0.0001f ? initialSpinAxis.normalized : Vector3.up;
+                angularSpeed = spinDegreesPerSecond;
+                duration = Mathf.Max(0.05f, lifetimeSeconds);
+                startScale = transform.localScale;
+                elapsed = 0f;
+            }
+
+            private void Update()
+            {
+                elapsed += Time.deltaTime;
+                var t = Mathf.Clamp01(elapsed / duration);
+                var easedDistanceTime = elapsed * Mathf.Lerp(1f, 0.68f, t);
+                transform.position = startPosition + velocity * easedDistanceTime;
+                transform.Rotate(spinAxis, angularSpeed * Time.deltaTime, Space.World);
+
+                var shrink = 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.62f, 1f, t));
+                transform.localScale = startScale * Mathf.Max(0.001f, shrink);
+                if (elapsed >= duration)
+                {
+                    Destroy(gameObject);
+                }
+            }
+        }
+
+        private sealed class UnsupportedIslandSprayBurstCleanup : MonoBehaviour
+        {
+            private float duration;
+            private float elapsed;
+
+            public void Initialize(float lifetimeSeconds)
+            {
+                duration = Mathf.Max(0.05f, lifetimeSeconds);
+                elapsed = 0f;
+            }
+
+            private void Update()
+            {
+                elapsed += Time.deltaTime;
+                if (elapsed >= duration)
+                {
+                    Destroy(gameObject);
                 }
             }
         }
@@ -274,9 +482,10 @@ namespace ArenaShooter
             InitializeChunks();
             if (UsesContourOwnedWallDamage())
             {
-                AddContourOwnedWallDamage(hitPoint);
+                var stamp = AddContourOwnedWallDamage(hitPoint);
+                SpawnContourOwnedWallHitSpray(stamp, hitNormal);
+                RemoveUnsupportedContourOwnedWallIslands(hitNormal);
                 RebuildCombinedMesh();
-                SpawnImpactDebris(hitPoint, hitNormal, intactMaterial, 4);
                 return;
             }
 
@@ -288,7 +497,6 @@ namespace ArenaShooter
 
             DamageChunk(chunk, amount, hitNormal, true);
             RebuildCombinedMesh();
-            SpawnImpactDebris(hitPoint, hitNormal, intactMaterial, 4);
         }
 
         public bool AllowsProjectilePassThrough(Vector3 hitPoint, Vector3 hitNormal)
@@ -958,11 +1166,11 @@ namespace ArenaShooter
                 configuredOutlineCategory != StylizedOutlineCategory.Floor;
         }
 
-        private void AddContourOwnedWallDamage(Vector3 hitPoint)
+        private DamageStamp AddContourOwnedWallDamage(Vector3 hitPoint)
         {
             if (!TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out var bounds))
             {
-                return;
+                return null;
             }
 
             var localHit = transform.InverseTransformPoint(hitPoint);
@@ -979,6 +1187,1598 @@ namespace ArenaShooter
                 halfV * 1.08f,
                 CalculateContourOwnedWallDamageSeed(center));
             wallDamageStamps.Add(stamp);
+            return stamp;
+        }
+
+        private void RemoveUnsupportedContourOwnedWallIslands()
+        {
+            var fallbackNormal = transform.TransformDirection(GetWallNormalLocal());
+            RemoveUnsupportedContourOwnedWallIslands(fallbackNormal);
+        }
+
+        private void RemoveUnsupportedContourOwnedWallIslands(Vector3 hitNormalWorld)
+        {
+            if (!UsesContourOwnedWallDamage() ||
+                wallDamageStamps.Count == 0 ||
+                !TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out var bounds))
+            {
+                return;
+            }
+
+            var sprayDirectionWorld = hitNormalWorld.sqrMagnitude > 0.0001f
+                ? -hitNormalWorld.normalized
+                : transform.TransformDirection(-normal);
+            var sprayBudget = MaxUnsupportedIslandSpraysPerDamage;
+            for (var pass = 0; pass < UnsupportedIslandCleanupPasses; pass++)
+            {
+                var islands = FindUnsupportedContourOwnedWallIslands(bounds);
+                if (islands.Count == 0)
+                {
+                    break;
+                }
+
+                var removedAnyIsland = false;
+                for (var i = 0; i < islands.Count; i++)
+                {
+                    var island = islands[i];
+                    if (!island.RequiresSpray)
+                    {
+                        AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
+                        removedAnyIsland = true;
+                        continue;
+                    }
+
+                    if (sprayBudget <= 0)
+                    {
+                        continue;
+                    }
+
+                    if (SpawnUnsupportedWallIslandSpray(island, normal, u, v, halfN, sprayDirectionWorld, ref sprayBudget))
+                    {
+                        AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
+                        removedAnyIsland = true;
+                    }
+                }
+
+                if (!removedAnyIsland)
+                {
+                    break;
+                }
+            }
+        }
+
+        private List<UnsupportedWallIsland> FindUnsupportedContourOwnedWallIslands(DamageComponentPlaneBounds bounds)
+        {
+            var islands = new List<UnsupportedWallIsland>();
+            if (!bounds.IsValid || wallDamageStamps.Count == 0)
+            {
+                return islands;
+            }
+
+            var grid = BuildUnsupportedIslandScanGrid(bounds);
+            if (grid.Count == 0)
+            {
+                return islands;
+            }
+
+            var coreLabels = LabelSupportCoreComponents(grid, out var coreSupported);
+            var ownerLabels = AssignSolidCellsToSupportCores(grid, coreLabels);
+            var unsupportedCells = BuildUnsupportedSolidMask(grid, ownerLabels, coreSupported);
+            AddUnsupportedIslandComponents(grid, unsupportedCells, islands);
+            AddOpenContourShardIslands(bounds, grid, ownerLabels, coreSupported, islands);
+
+            islands.Sort((a, b) => b.Area.CompareTo(a.Area));
+            return islands;
+        }
+
+        private UnsupportedIslandScanGrid BuildUnsupportedIslandScanGrid(DamageComponentPlaneBounds bounds)
+        {
+            var cellSize = Mathf.Max(
+                UnsupportedIslandScanTargetCellSize,
+                bounds.Width / UnsupportedIslandScanMaxCellsPerAxis,
+                bounds.Height / UnsupportedIslandScanMaxCellsPerAxis);
+            var columns = Mathf.Clamp(Mathf.CeilToInt(bounds.Width / cellSize), 1, UnsupportedIslandScanMaxCellsPerAxis);
+            var rows = Mathf.Clamp(Mathf.CeilToInt(bounds.Height / cellSize), 1, UnsupportedIslandScanMaxCellsPerAxis);
+            var stepU = bounds.Width / columns;
+            var stepV = bounds.Height / rows;
+            var supportRadiusCells = Mathf.Max(
+                1,
+                Mathf.CeilToInt((UnsupportedIslandSupportBridgeWidth * 0.5f) / Mathf.Max(0.0001f, Mathf.Min(stepU, stepV))));
+            var solid = new bool[columns * rows];
+            var supportCore = new bool[solid.Length];
+            var grid = new UnsupportedIslandScanGrid(bounds, columns, rows, supportRadiusCells, stepU, stepV, solid, supportCore);
+
+            for (var y = 0; y < rows; y++)
+            {
+                for (var x = 0; x < columns; x++)
+                {
+                    var index = grid.Index(x, y);
+                    solid[index] = IsWallMaterialPresentInScanCell(grid, x, y);
+                }
+            }
+
+            for (var y = 0; y < rows; y++)
+            {
+                for (var x = 0; x < columns; x++)
+                {
+                    var index = grid.Index(x, y);
+                    supportCore[index] = solid[index] && IsSupportCoreCell(grid, x, y);
+                }
+            }
+
+            return grid;
+        }
+
+        private bool IsWallMaterialPresentInScanCell(UnsupportedIslandScanGrid grid, int x, int y)
+        {
+            if (!IsPointInsideWallDamageUnion(grid.CellCenter(x, y)))
+            {
+                return true;
+            }
+
+            var offsetU = grid.StepU * UnsupportedIslandCellSampleInset;
+            var offsetV = grid.StepV * UnsupportedIslandCellSampleInset;
+            var solidSamples = 0;
+            solidSamples += IsWallMaterialPresentAtSample(grid, x, y, -offsetU, -offsetV) ? 1 : 0;
+            solidSamples += IsWallMaterialPresentAtSample(grid, x, y, offsetU, -offsetV) ? 1 : 0;
+            solidSamples += IsWallMaterialPresentAtSample(grid, x, y, offsetU, offsetV) ? 1 : 0;
+            solidSamples += IsWallMaterialPresentAtSample(grid, x, y, -offsetU, offsetV) ? 1 : 0;
+            solidSamples += IsWallMaterialPresentAtSample(grid, x, y, 0f, -offsetV) ? 1 : 0;
+            solidSamples += IsWallMaterialPresentAtSample(grid, x, y, offsetU, 0f) ? 1 : 0;
+            solidSamples += IsWallMaterialPresentAtSample(grid, x, y, 0f, offsetV) ? 1 : 0;
+            solidSamples += IsWallMaterialPresentAtSample(grid, x, y, -offsetU, 0f) ? 1 : 0;
+            return solidSamples >= UnsupportedIslandMinimumSolidCellSamples;
+        }
+
+        private bool IsWallMaterialPresentAtSample(UnsupportedIslandScanGrid grid, int x, int y, float offsetU, float offsetV)
+        {
+            var sample = grid.CellCenter(x, y) + new Vector2(offsetU, offsetV);
+            return sample.x >= grid.Bounds.MinU &&
+                sample.x <= grid.Bounds.MaxU &&
+                sample.y >= grid.Bounds.MinV &&
+                sample.y <= grid.Bounds.MaxV &&
+                !IsPointInsideWallDamageUnion(sample);
+        }
+
+        private static bool IsSupportCoreCell(UnsupportedIslandScanGrid grid, int x, int y)
+        {
+            var radius = grid.SupportRadiusCells;
+            var radiusSquared = radius * radius;
+            var sampleCount = 0;
+            for (var dy = -radius; dy <= radius; dy++)
+            {
+                for (var dx = -radius; dx <= radius; dx++)
+                {
+                    if (dx * dx + dy * dy > radiusSquared)
+                    {
+                        continue;
+                    }
+
+                    var sampleX = x + dx;
+                    var sampleY = y + dy;
+                    if (!grid.ContainsCell(sampleX, sampleY))
+                    {
+                        continue;
+                    }
+
+                    sampleCount++;
+                    if (!grid.Solid[grid.Index(sampleX, sampleY)])
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return sampleCount > 0;
+        }
+
+        private static int[] LabelSupportCoreComponents(UnsupportedIslandScanGrid grid, out bool[] coreSupported)
+        {
+            var labels = CreateFilledIntArray(grid.Count, -1);
+            var supported = new List<bool>();
+            var queue = new Queue<int>();
+            for (var index = 0; index < grid.Count; index++)
+            {
+                if (!grid.SupportCore[index] || labels[index] >= 0)
+                {
+                    continue;
+                }
+
+                var label = supported.Count;
+                var perimeterContactLength = 0f;
+                var perimeterSideMask = 0;
+                labels[index] = label;
+                queue.Enqueue(index);
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+                    var x = grid.CellX(current);
+                    var y = grid.CellY(current);
+                    AccumulatePerimeterSupportContact(grid, x, y, ref perimeterContactLength, ref perimeterSideMask);
+                    QueueSupportCoreNeighbors(grid, labels, queue, x, y, label);
+                }
+
+                supported.Add(IsMeaningfulPerimeterSupport(grid, perimeterContactLength, perimeterSideMask));
+            }
+
+            coreSupported = supported.ToArray();
+            return labels;
+        }
+
+        private static void AccumulatePerimeterSupportContact(
+            UnsupportedIslandScanGrid grid,
+            int x,
+            int y,
+            ref float contactLength,
+            ref int sideMask)
+        {
+            if (x == 0)
+            {
+                contactLength += grid.StepV;
+                sideMask |= 1;
+            }
+
+            if (x == grid.Columns - 1)
+            {
+                contactLength += grid.StepV;
+                sideMask |= 2;
+            }
+
+            if (y == 0)
+            {
+                contactLength += grid.StepU;
+                sideMask |= 4;
+            }
+
+            if (y == grid.Rows - 1)
+            {
+                contactLength += grid.StepU;
+                sideMask |= 8;
+            }
+        }
+
+        private static bool IsMeaningfulPerimeterSupport(UnsupportedIslandScanGrid grid, float contactLength, int sideMask)
+        {
+            if (sideMask == 0)
+            {
+                return false;
+            }
+
+            if (CountSetBits(sideMask) >= 2 && contactLength >= UnsupportedIslandSupportBridgeWidth)
+            {
+                return true;
+            }
+
+            return contactLength >= CalculatePerimeterSupportMinSpan(grid);
+        }
+
+        private static float CalculatePerimeterSupportMinSpan(UnsupportedIslandScanGrid grid)
+        {
+            return Mathf.Max(
+                UnsupportedIslandPerimeterSupportMinSpan,
+                UnsupportedIslandSupportBridgeWidth * 2.5f,
+                Mathf.Min(grid.Bounds.Width, grid.Bounds.Height) * 0.08f);
+        }
+
+        private static int CountSetBits(int value)
+        {
+            var count = 0;
+            while (value != 0)
+            {
+                count += value & 1;
+                value >>= 1;
+            }
+
+            return count;
+        }
+
+        private static void QueueSupportCoreNeighbors(
+            UnsupportedIslandScanGrid grid,
+            int[] labels,
+            Queue<int> queue,
+            int x,
+            int y,
+            int label)
+        {
+            for (var i = 0; i < IslandScanNeighborOffsets.Length; i++)
+            {
+                var neighbor = IslandScanNeighborOffsets[i];
+                var neighborX = x + neighbor.x;
+                var neighborY = y + neighbor.y;
+                if (!grid.ContainsCell(neighborX, neighborY))
+                {
+                    continue;
+                }
+
+                var neighborIndex = grid.Index(neighborX, neighborY);
+                if (!grid.SupportCore[neighborIndex] || labels[neighborIndex] >= 0)
+                {
+                    continue;
+                }
+
+                labels[neighborIndex] = label;
+                queue.Enqueue(neighborIndex);
+            }
+        }
+
+        private static int[] AssignSolidCellsToSupportCores(UnsupportedIslandScanGrid grid, int[] coreLabels)
+        {
+            var owners = CreateFilledIntArray(grid.Count, -1);
+            var queue = new Queue<int>();
+            for (var index = 0; index < grid.Count; index++)
+            {
+                if (coreLabels[index] < 0)
+                {
+                    continue;
+                }
+
+                owners[index] = coreLabels[index];
+                queue.Enqueue(index);
+            }
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                var x = grid.CellX(current);
+                var y = grid.CellY(current);
+                for (var i = 0; i < IslandScanNeighborOffsets.Length; i++)
+                {
+                    var neighbor = IslandScanNeighborOffsets[i];
+                    var neighborX = x + neighbor.x;
+                    var neighborY = y + neighbor.y;
+                    if (!grid.ContainsCell(neighborX, neighborY))
+                    {
+                        continue;
+                    }
+
+                    var neighborIndex = grid.Index(neighborX, neighborY);
+                    if (!grid.Solid[neighborIndex] || owners[neighborIndex] >= 0)
+                    {
+                        continue;
+                    }
+
+                    owners[neighborIndex] = owners[current];
+                    queue.Enqueue(neighborIndex);
+                }
+            }
+
+            return owners;
+        }
+
+        private static bool[] BuildUnsupportedSolidMask(UnsupportedIslandScanGrid grid, int[] ownerLabels, bool[] coreSupported)
+        {
+            var unsupported = new bool[grid.Count];
+            var noCoreVisited = new bool[grid.Count];
+            var queue = new Queue<int>();
+            var noCoreComponent = new List<int>();
+            for (var index = 0; index < grid.Count; index++)
+            {
+                if (!grid.Solid[index])
+                {
+                    continue;
+                }
+
+                var owner = ownerLabels[index];
+                if (owner >= 0)
+                {
+                    unsupported[index] = owner >= coreSupported.Length || !coreSupported[owner];
+                    continue;
+                }
+
+                if (noCoreVisited[index])
+                {
+                    continue;
+                }
+
+                noCoreComponent.Clear();
+                noCoreVisited[index] = true;
+                queue.Enqueue(index);
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+                    noCoreComponent.Add(current);
+                    var x = grid.CellX(current);
+                    var y = grid.CellY(current);
+                    QueueNoCoreSolidNeighbors(grid, ownerLabels, noCoreVisited, queue, x, y);
+                }
+
+                for (var i = 0; i < noCoreComponent.Count; i++)
+                {
+                    unsupported[noCoreComponent[i]] = true;
+                }
+            }
+
+            return unsupported;
+        }
+
+        private static void QueueNoCoreSolidNeighbors(
+            UnsupportedIslandScanGrid grid,
+            int[] ownerLabels,
+            bool[] visited,
+            Queue<int> queue,
+            int x,
+            int y)
+        {
+            for (var i = 0; i < IslandScanNeighborOffsets.Length; i++)
+            {
+                var neighbor = IslandScanNeighborOffsets[i];
+                var neighborX = x + neighbor.x;
+                var neighborY = y + neighbor.y;
+                if (!grid.ContainsCell(neighborX, neighborY))
+                {
+                    continue;
+                }
+
+                var neighborIndex = grid.Index(neighborX, neighborY);
+                if (!grid.Solid[neighborIndex] || ownerLabels[neighborIndex] >= 0 || visited[neighborIndex])
+                {
+                    continue;
+                }
+
+                visited[neighborIndex] = true;
+                queue.Enqueue(neighborIndex);
+            }
+        }
+
+        private static void AddUnsupportedIslandComponents(
+            UnsupportedIslandScanGrid grid,
+            bool[] unsupportedCells,
+            List<UnsupportedWallIsland> islands)
+        {
+            var visited = new bool[grid.Count];
+            var queue = new Queue<int>();
+            var componentCells = new List<int>();
+            var componentMask = new bool[grid.Count];
+            for (var index = 0; index < grid.Count; index++)
+            {
+                if (!unsupportedCells[index] || visited[index])
+                {
+                    continue;
+                }
+
+                componentCells.Clear();
+                visited[index] = true;
+                queue.Enqueue(index);
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+                    componentCells.Add(current);
+                    componentMask[current] = true;
+                    var x = grid.CellX(current);
+                    var y = grid.CellY(current);
+                    QueueUnsupportedIslandNeighbors(grid, unsupportedCells, visited, queue, x, y);
+                }
+
+                if (TryCreateUnsupportedIslandFromCells(grid, componentCells, componentMask, out var island))
+                {
+                    islands.Add(island);
+                }
+
+                for (var i = 0; i < componentCells.Count; i++)
+                {
+                    componentMask[componentCells[i]] = false;
+                }
+            }
+        }
+
+        private void AddOpenContourShardIslands(
+            DamageComponentPlaneBounds bounds,
+            UnsupportedIslandScanGrid grid,
+            int[] ownerLabels,
+            bool[] coreSupported,
+            List<UnsupportedWallIsland> islands)
+        {
+            var thickness = GetContourOwnedWallContourThickness();
+            var rawSegments = BuildClippedVisibleContourSegments(bounds, thickness, false);
+            if (rawSegments.Count == 0)
+            {
+                return;
+            }
+
+            var groups = BuildContourSegmentGroups(rawSegments, Mathf.Max(0.002f, thickness * 0.35f));
+            if (groups.Count == 0)
+            {
+                return;
+            }
+
+            var supportProbeDistance = Mathf.Max(
+                thickness * OpenContourShardSupportProbeScale,
+                OpenContourShardMinimumSegmentLength * 2f);
+            var boundaryHalfWidth = Mathf.Max(
+                thickness * OpenContourShardBoundaryWidthScale,
+                OpenContourShardMinimumSegmentLength * 0.5f);
+            for (var i = 0; i < groups.Count; i++)
+            {
+                var group = groups[i];
+                if (!IsContourShardCandidateGroup(group, supportProbeDistance) ||
+                    ContourGroupTouchesBounds(group, bounds, supportProbeDistance) ||
+                    IsOpenContourGroupOwnedByUnsupportedIsland(group, rawSegments, islands, supportProbeDistance) ||
+                    IsOpenContourGroupAdjacentToSupportedMaterial(group, rawSegments, grid, ownerLabels, coreSupported, supportProbeDistance))
+                {
+                    continue;
+                }
+
+                if (TryCreateOpenContourShardIsland(group, rawSegments, boundaryHalfWidth, out var island))
+                {
+                    islands.Add(island);
+                }
+            }
+        }
+
+        private static bool IsContourShardCandidateGroup(ContourSegmentGroup group, float supportProbeDistance)
+        {
+            if (group.SegmentIndexes.Count == 0)
+            {
+                return false;
+            }
+
+            if (!group.IsClosed)
+            {
+                var openMaxSpan = Mathf.Max(group.Span.x, group.Span.y);
+                var openMinSpan = Mathf.Min(group.Span.x, group.Span.y);
+                return group.SegmentIndexes.Count <= 2 ||
+                    group.TotalLength <= supportProbeDistance * 6f ||
+                    openMinSpan <= supportProbeDistance * 1.5f ||
+                    openMaxSpan <= supportProbeDistance * 2.5f;
+            }
+
+            if (group.SegmentIndexes.Count > 8)
+            {
+                return false;
+            }
+
+            var maxSpan = Mathf.Max(group.Span.x, group.Span.y);
+            var smallClosedShardLimit = Mathf.Max(
+                supportProbeDistance * 1.25f,
+                OpenContourShardMinimumSegmentLength * 4f);
+            return maxSpan <= smallClosedShardLimit;
+        }
+
+        private static bool ContourGroupTouchesBounds(ContourSegmentGroup group, DamageComponentPlaneBounds bounds, float margin)
+        {
+            return group.Min.x <= bounds.MinU + margin ||
+                group.Max.x >= bounds.MaxU - margin ||
+                group.Min.y <= bounds.MinV + margin ||
+                group.Max.y >= bounds.MaxV - margin;
+        }
+
+        private bool IsOpenContourGroupAdjacentToSupportedMaterial(
+            ContourSegmentGroup group,
+            List<ContourSegment2D> segments,
+            UnsupportedIslandScanGrid grid,
+            int[] ownerLabels,
+            bool[] coreSupported,
+            float probeDistance)
+        {
+            for (var i = 0; i < group.SegmentIndexes.Count; i++)
+            {
+                var segment = segments[group.SegmentIndexes[i]];
+                if (OpenContourSegmentTouchesSupportedMaterial(segment.Start, segment.End, grid, ownerLabels, coreSupported, probeDistance))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool OpenContourSegmentTouchesSupportedMaterial(
+            Vector2 start,
+            Vector2 end,
+            UnsupportedIslandScanGrid grid,
+            int[] ownerLabels,
+            bool[] coreSupported,
+            float probeDistance)
+        {
+            var delta = end - start;
+            var length = delta.magnitude;
+            if (length <= 0.0001f)
+            {
+                return OpenContourSideProbeTouchesSupportedMaterial(start, Vector2.right, grid, ownerLabels, coreSupported, probeDistance);
+            }
+
+            var direction = delta / length;
+            var perpendicular = new Vector2(-direction.y, direction.x);
+            var sampleCount = Mathf.Clamp(
+                Mathf.CeilToInt(length / Mathf.Max(0.0001f, probeDistance)),
+                1,
+                32);
+            for (var i = 0; i <= sampleCount; i++)
+            {
+                var point = Vector2.Lerp(start, end, i / (float)sampleCount);
+                if (OpenContourSideProbeTouchesSupportedMaterial(point, perpendicular, grid, ownerLabels, coreSupported, probeDistance))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool OpenContourSideProbeTouchesSupportedMaterial(
+            Vector2 point,
+            Vector2 perpendicular,
+            UnsupportedIslandScanGrid grid,
+            int[] ownerLabels,
+            bool[] coreSupported,
+            float probeDistance)
+        {
+            return IsOpenContourSupportedMaterialProbe(point + perpendicular * probeDistance, grid, ownerLabels, coreSupported) ||
+                IsOpenContourSupportedMaterialProbe(point - perpendicular * probeDistance, grid, ownerLabels, coreSupported) ||
+                IsOpenContourSupportedMaterialProbe(point + perpendicular * probeDistance * 0.5f, grid, ownerLabels, coreSupported) ||
+                IsOpenContourSupportedMaterialProbe(point - perpendicular * probeDistance * 0.5f, grid, ownerLabels, coreSupported);
+        }
+
+        private bool IsOpenContourSupportedMaterialProbe(
+            Vector2 point,
+            UnsupportedIslandScanGrid grid,
+            int[] ownerLabels,
+            bool[] coreSupported)
+        {
+            if (IsPointInsideWallDamageUnion(point))
+            {
+                return false;
+            }
+
+            if (!TryGetScanCell(grid, point, out var x, out var y))
+            {
+                return false;
+            }
+
+            return IsSupportedSolidCell(grid, ownerLabels, coreSupported, x, y);
+        }
+
+        private static bool TryGetScanCell(UnsupportedIslandScanGrid grid, Vector2 point, out int x, out int y)
+        {
+            x = 0;
+            y = 0;
+            if (point.x < grid.Bounds.MinU ||
+                point.x > grid.Bounds.MaxU ||
+                point.y < grid.Bounds.MinV ||
+                point.y > grid.Bounds.MaxV)
+            {
+                return false;
+            }
+
+            x = Mathf.Clamp(Mathf.FloorToInt((point.x - grid.Bounds.MinU) / Mathf.Max(0.0001f, grid.StepU)), 0, grid.Columns - 1);
+            y = Mathf.Clamp(Mathf.FloorToInt((point.y - grid.Bounds.MinV) / Mathf.Max(0.0001f, grid.StepV)), 0, grid.Rows - 1);
+            return true;
+        }
+
+        private static bool IsSupportedSolidCell(
+            UnsupportedIslandScanGrid grid,
+            int[] ownerLabels,
+            bool[] coreSupported,
+            int x,
+            int y)
+        {
+            if (!grid.ContainsCell(x, y))
+            {
+                return false;
+            }
+
+            var index = grid.Index(x, y);
+            if (!grid.Solid[index] || ownerLabels == null || index >= ownerLabels.Length)
+            {
+                return false;
+            }
+
+            var owner = ownerLabels[index];
+            return owner >= 0 && owner < coreSupported.Length && coreSupported[owner];
+        }
+
+        private static bool IsOpenContourGroupOwnedByUnsupportedIsland(
+            ContourSegmentGroup group,
+            List<ContourSegment2D> segments,
+            List<UnsupportedWallIsland> islands,
+            float margin)
+        {
+            if (islands.Count == 0)
+            {
+                return false;
+            }
+
+            for (var islandIndex = 0; islandIndex < islands.Count; islandIndex++)
+            {
+                var island = islands[islandIndex];
+                if (island == null ||
+                    !BoundsOverlap(
+                        group.Min - Vector2.one * margin,
+                        group.Max + Vector2.one * margin,
+                        island.Min,
+                        island.Max))
+                {
+                    continue;
+                }
+
+                var allSegmentsOwned = true;
+                for (var segmentIndex = 0; segmentIndex < group.SegmentIndexes.Count; segmentIndex++)
+                {
+                    var segment = segments[group.SegmentIndexes[segmentIndex]];
+                    if (!OpenContourSegmentOwnedByIsland(segment.Start, segment.End, island, margin))
+                    {
+                        allSegmentsOwned = false;
+                        break;
+                    }
+                }
+
+                if (allSegmentsOwned)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool OpenContourSegmentOwnedByIsland(Vector2 start, Vector2 end, UnsupportedWallIsland island, float margin)
+        {
+            var delta = end - start;
+            var length = delta.magnitude;
+            var sampleCount = Mathf.Clamp(Mathf.CeilToInt(length / Mathf.Max(0.0001f, margin)), 1, 16);
+            for (var i = 0; i <= sampleCount; i++)
+            {
+                if (!OpenContourPointCoveredByIsland(Vector2.Lerp(start, end, i / (float)sampleCount), island, margin))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool OpenContourPointCoveredByIsland(Vector2 point, UnsupportedWallIsland island, float margin)
+        {
+            return island != null &&
+                point.x >= island.Min.x - margin &&
+                point.x <= island.Max.x + margin &&
+                point.y >= island.Min.y - margin &&
+                point.y <= island.Max.y + margin &&
+                (IsPointInPolygon(point, island.Points) ||
+                    IsPointNearPolygonBoundary(point, island.Points, margin));
+        }
+
+        private static bool IsPointNearPolygonBoundary(Vector2 point, List<Vector2> polygon, float margin)
+        {
+            if (polygon == null || polygon.Count < 2)
+            {
+                return false;
+            }
+
+            var marginSquared = margin * margin;
+            for (var i = 0; i < polygon.Count; i++)
+            {
+                var next = (i + 1) % polygon.Count;
+                if (DistancePointToSegmentSquared(point, polygon[i], polygon[next]) <= marginSquared)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static float DistancePointToSegmentSquared(Vector2 point, Vector2 start, Vector2 end)
+        {
+            var delta = end - start;
+            var lengthSquared = delta.sqrMagnitude;
+            if (lengthSquared <= 0.000001f)
+            {
+                return (point - start).sqrMagnitude;
+            }
+
+            var t = Mathf.Clamp01(Vector2.Dot(point - start, delta) / lengthSquared);
+            return (point - (start + delta * t)).sqrMagnitude;
+        }
+
+        private static bool TryCreateOpenContourShardIsland(
+            ContourSegmentGroup group,
+            List<ContourSegment2D> segments,
+            float halfWidth,
+            out UnsupportedWallIsland island)
+        {
+            island = null;
+            var hullCandidates = new List<Vector2>();
+            var weightedCentroid = Vector2.zero;
+            var endpointSum = Vector2.zero;
+            var endpointCount = 0;
+            var totalLength = 0f;
+            for (var i = 0; i < group.SegmentIndexes.Count; i++)
+            {
+                var segment = segments[group.SegmentIndexes[i]];
+                var length = (segment.End - segment.Start).magnitude;
+                endpointSum += segment.Start + segment.End;
+                endpointCount += 2;
+                if (length < OpenContourShardMinimumSegmentLength)
+                {
+                    continue;
+                }
+
+                AddInflatedOpenContourPointSamples(hullCandidates, segment.Start, halfWidth);
+                AddInflatedOpenContourPointSamples(hullCandidates, segment.End, halfWidth);
+                weightedCentroid += (segment.Start + segment.End) * 0.5f * length;
+                totalLength += length;
+            }
+
+            if (totalLength < OpenContourShardMinimumSegmentLength)
+            {
+                var center = endpointCount > 0 ? endpointSum / endpointCount : group.Centroid;
+                return TryCreatePinContourShardIsland(center, halfWidth, out island);
+            }
+
+            if (!TryBuildConvexHull(hullCandidates, out var points))
+            {
+                return false;
+            }
+
+            SanitizePolygonLoop(points);
+            if (points.Count < 3)
+            {
+                return false;
+            }
+
+            var area = CalculateSignedPolygonArea(points);
+            if (area < 0f)
+            {
+                points.Reverse();
+                area = -area;
+            }
+
+            if (area <= 0.000001f)
+            {
+                return false;
+            }
+
+            CalculatePolygonBounds(points, out var min, out var max);
+            var sprayAreaEstimate = totalLength * halfWidth;
+            island = new UnsupportedWallIsland(
+                points,
+                weightedCentroid / Mathf.Max(0.0001f, totalLength),
+                min,
+                max,
+                area,
+                sprayAreaEstimate > UnsupportedIslandSprayMinimumArea);
+            return true;
+        }
+
+        private static bool TryCreatePinContourShardIsland(Vector2 center, float radius, out UnsupportedWallIsland island)
+        {
+            island = null;
+            var safeRadius = Mathf.Max(radius, OpenContourShardMinimumSegmentLength * 0.5f);
+            var points = new List<Vector2>(8);
+            for (var i = 0; i < 8; i++)
+            {
+                var angle = i / 8f * Mathf.PI * 2f;
+                var radiusScale = (i & 1) == 0 ? 1f : 0.64f;
+                points.Add(center + new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * safeRadius * radiusScale);
+            }
+
+            SanitizePolygonLoop(points);
+            if (points.Count < 3)
+            {
+                return false;
+            }
+
+            var area = CalculateSignedPolygonArea(points);
+            if (area < 0f)
+            {
+                points.Reverse();
+                area = -area;
+            }
+
+            if (area <= 0.000001f)
+            {
+                return false;
+            }
+
+            CalculatePolygonBounds(points, out var min, out var max);
+            island = new UnsupportedWallIsland(points, center, min, max, area, false);
+            return true;
+        }
+
+        private static void AddInflatedOpenContourPointSamples(List<Vector2> points, Vector2 center, float radius)
+        {
+            const int samples = 8;
+            for (var i = 0; i < samples; i++)
+            {
+                var angle = i / (float)samples * Mathf.PI * 2f;
+                points.Add(center + new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * radius);
+            }
+        }
+
+        private static bool TryBuildConvexHull(List<Vector2> candidates, out List<Vector2> hull)
+        {
+            hull = null;
+            if (candidates == null || candidates.Count < 3)
+            {
+                return false;
+            }
+
+            candidates.Sort((a, b) =>
+            {
+                var compareX = a.x.CompareTo(b.x);
+                return compareX != 0 ? compareX : a.y.CompareTo(b.y);
+            });
+
+            var unique = new List<Vector2>(candidates.Count);
+            for (var i = 0; i < candidates.Count; i++)
+            {
+                if (unique.Count == 0 || (candidates[i] - unique[unique.Count - 1]).sqrMagnitude > 0.0000001f)
+                {
+                    unique.Add(candidates[i]);
+                }
+            }
+
+            if (unique.Count < 3)
+            {
+                return false;
+            }
+
+            var lower = new List<Vector2>();
+            for (var i = 0; i < unique.Count; i++)
+            {
+                while (lower.Count >= 2 &&
+                    Cross2D(lower[lower.Count - 1] - lower[lower.Count - 2], unique[i] - lower[lower.Count - 1]) <= 0f)
+                {
+                    lower.RemoveAt(lower.Count - 1);
+                }
+
+                lower.Add(unique[i]);
+            }
+
+            var upper = new List<Vector2>();
+            for (var i = unique.Count - 1; i >= 0; i--)
+            {
+                while (upper.Count >= 2 &&
+                    Cross2D(upper[upper.Count - 1] - upper[upper.Count - 2], unique[i] - upper[upper.Count - 1]) <= 0f)
+                {
+                    upper.RemoveAt(upper.Count - 1);
+                }
+
+                upper.Add(unique[i]);
+            }
+
+            lower.RemoveAt(lower.Count - 1);
+            upper.RemoveAt(upper.Count - 1);
+            hull = lower;
+            hull.AddRange(upper);
+            return hull.Count >= 3;
+        }
+
+        private static void QueueUnsupportedIslandNeighbors(
+            UnsupportedIslandScanGrid grid,
+            bool[] unsupportedCells,
+            bool[] visited,
+            Queue<int> queue,
+            int x,
+            int y)
+        {
+            for (var i = 0; i < IslandScanNeighborOffsets.Length; i++)
+            {
+                var neighbor = IslandScanNeighborOffsets[i];
+                var neighborX = x + neighbor.x;
+                var neighborY = y + neighbor.y;
+                if (!grid.ContainsCell(neighborX, neighborY))
+                {
+                    continue;
+                }
+
+                var neighborIndex = grid.Index(neighborX, neighborY);
+                if (!unsupportedCells[neighborIndex] || visited[neighborIndex])
+                {
+                    continue;
+                }
+
+                visited[neighborIndex] = true;
+                queue.Enqueue(neighborIndex);
+            }
+        }
+
+        private static bool TryCreateUnsupportedIslandFromCells(
+            UnsupportedIslandScanGrid grid,
+            List<int> cells,
+            bool[] componentMask,
+            out UnsupportedWallIsland island)
+        {
+            island = null;
+            var cellArea = cells.Count * grid.StepU * grid.StepV;
+            var boundaryCells = cells;
+            var boundaryMask = componentMask;
+            var cellsTouchBounds = CellsTouchScanBounds(grid, cells);
+            if (cellsTouchBounds)
+            {
+                BuildExpandedUnsupportedIslandCleanupCells(grid, cells, out boundaryCells, out boundaryMask);
+            }
+
+            if (!TryBuildUnsupportedIslandBoundaryLoop(grid, boundaryCells, boundaryMask, out var points))
+            {
+                return false;
+            }
+
+            SanitizePolygonLoop(points);
+            if (points.Count < 3)
+            {
+                return false;
+            }
+
+            var polygonArea = CalculateSignedPolygonArea(points);
+            if (Mathf.Abs(polygonArea) <= 0.000001f)
+            {
+                return false;
+            }
+
+            if (polygonArea < 0f)
+            {
+                points.Reverse();
+                polygonArea = -polygonArea;
+            }
+
+            CalculatePolygonBounds(points, out var min, out var max);
+            var touchesBounds = IslandBoundsTouchScanBounds(grid, min, max);
+            var area = Mathf.Max(cellArea, polygonArea);
+            island = new UnsupportedWallIsland(
+                points,
+                CalculateUnsupportedIslandCellCentroid(grid, cells),
+                min,
+                max,
+                area,
+                !cellsTouchBounds && !touchesBounds && area > UnsupportedIslandSprayMinimumArea);
+            return true;
+        }
+
+        private static bool CellsTouchScanBounds(UnsupportedIslandScanGrid grid, List<int> cells)
+        {
+            for (var i = 0; i < cells.Count; i++)
+            {
+                var x = grid.CellX(cells[i]);
+                var y = grid.CellY(cells[i]);
+                if (grid.IsPerimeterCell(x, y))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void BuildExpandedUnsupportedIslandCleanupCells(
+            UnsupportedIslandScanGrid grid,
+            List<int> sourceCells,
+            out List<int> expandedCells,
+            out bool[] expandedMask)
+        {
+            expandedCells = new List<int>(sourceCells.Count);
+            expandedMask = new bool[grid.Count];
+            for (var i = 0; i < sourceCells.Count; i++)
+            {
+                var sourceX = grid.CellX(sourceCells[i]);
+                var sourceY = grid.CellY(sourceCells[i]);
+                for (var dy = -1; dy <= 1; dy++)
+                {
+                    for (var dx = -1; dx <= 1; dx++)
+                    {
+                        var x = sourceX + dx;
+                        var y = sourceY + dy;
+                        if (!grid.ContainsCell(x, y))
+                        {
+                            continue;
+                        }
+
+                        var index = grid.Index(x, y);
+                        if (expandedMask[index])
+                        {
+                            continue;
+                        }
+
+                        expandedMask[index] = true;
+                        expandedCells.Add(index);
+                    }
+                }
+            }
+        }
+
+        private static bool IslandBoundsTouchScanBounds(UnsupportedIslandScanGrid grid, Vector2 min, Vector2 max)
+        {
+            var margin = Mathf.Max(grid.StepU, grid.StepV) * 0.5f;
+            return min.x <= grid.Bounds.MinU + margin ||
+                max.x >= grid.Bounds.MaxU - margin ||
+                min.y <= grid.Bounds.MinV + margin ||
+                max.y >= grid.Bounds.MaxV - margin;
+        }
+
+        private static Vector2 CalculateUnsupportedIslandCellCentroid(UnsupportedIslandScanGrid grid, List<int> cells)
+        {
+            var centroid = Vector2.zero;
+            for (var i = 0; i < cells.Count; i++)
+            {
+                centroid += grid.CellCenter(grid.CellX(cells[i]), grid.CellY(cells[i]));
+            }
+
+            return centroid / Mathf.Max(1, cells.Count);
+        }
+
+        private static bool TryBuildUnsupportedIslandBoundaryLoop(
+            UnsupportedIslandScanGrid grid,
+            List<int> cells,
+            bool[] componentMask,
+            out List<Vector2> points)
+        {
+            var edges = new List<BoundaryEdge>(cells.Count * 2);
+            for (var i = 0; i < cells.Count; i++)
+            {
+                var index = cells[i];
+                var x = grid.CellX(index);
+                var y = grid.CellY(index);
+                if (!IsComponentCell(grid, componentMask, x, y - 1))
+                {
+                    edges.Add(new BoundaryEdge(new Vector2Int(x, y), new Vector2Int(x + 1, y)));
+                }
+
+                if (!IsComponentCell(grid, componentMask, x + 1, y))
+                {
+                    edges.Add(new BoundaryEdge(new Vector2Int(x + 1, y), new Vector2Int(x + 1, y + 1)));
+                }
+
+                if (!IsComponentCell(grid, componentMask, x, y + 1))
+                {
+                    edges.Add(new BoundaryEdge(new Vector2Int(x + 1, y + 1), new Vector2Int(x, y + 1)));
+                }
+
+                if (!IsComponentCell(grid, componentMask, x - 1, y))
+                {
+                    edges.Add(new BoundaryEdge(new Vector2Int(x, y + 1), new Vector2Int(x, y)));
+                }
+            }
+
+            return TryBuildLargestBoundaryLoop(grid, edges, out points);
+        }
+
+        private static bool IsComponentCell(UnsupportedIslandScanGrid grid, bool[] componentMask, int x, int y)
+        {
+            return grid.ContainsCell(x, y) && componentMask[grid.Index(x, y)];
+        }
+
+        private static bool TryBuildLargestBoundaryLoop(
+            UnsupportedIslandScanGrid grid,
+            List<BoundaryEdge> edges,
+            out List<Vector2> points)
+        {
+            points = null;
+            if (edges.Count < 3)
+            {
+                return false;
+            }
+
+            var outgoing = new Dictionary<Vector2Int, List<int>>();
+            for (var i = 0; i < edges.Count; i++)
+            {
+                if (!outgoing.TryGetValue(edges[i].Start, out var edgeIndexes))
+                {
+                    edgeIndexes = new List<int>();
+                    outgoing[edges[i].Start] = edgeIndexes;
+                }
+
+                edgeIndexes.Add(i);
+            }
+
+            var visited = new bool[edges.Count];
+            var bestArea = 0f;
+            for (var i = 0; i < edges.Count; i++)
+            {
+                if (visited[i])
+                {
+                    continue;
+                }
+
+                if (!TryBuildBoundaryCornerLoop(edges, outgoing, visited, i, out var corners))
+                {
+                    continue;
+                }
+
+                var loopPoints = new List<Vector2>(corners.Count);
+                for (var cornerIndex = 0; cornerIndex < corners.Count; cornerIndex++)
+                {
+                    loopPoints.Add(grid.CornerToUv(corners[cornerIndex]));
+                }
+
+                var area = Mathf.Abs(CalculateSignedPolygonArea(loopPoints));
+                if (area > bestArea)
+                {
+                    bestArea = area;
+                    points = loopPoints;
+                }
+            }
+
+            return points != null && points.Count >= 3;
+        }
+
+        private static bool TryBuildBoundaryCornerLoop(
+            List<BoundaryEdge> edges,
+            Dictionary<Vector2Int, List<int>> outgoing,
+            bool[] visited,
+            int firstEdgeIndex,
+            out List<Vector2Int> corners)
+        {
+            corners = new List<Vector2Int>();
+            var start = edges[firstEdgeIndex].Start;
+            var edgeIndex = firstEdgeIndex;
+            var guard = edges.Count + 1;
+            while (guard-- > 0)
+            {
+                if (visited[edgeIndex])
+                {
+                    return false;
+                }
+
+                var edge = edges[edgeIndex];
+                visited[edgeIndex] = true;
+                if (corners.Count == 0)
+                {
+                    corners.Add(edge.Start);
+                }
+
+                if (edge.End == start)
+                {
+                    return corners.Count >= 3;
+                }
+
+                corners.Add(edge.End);
+                if (!TryFindNextBoundaryEdge(outgoing, edge.End, visited, out edgeIndex))
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryFindNextBoundaryEdge(
+            Dictionary<Vector2Int, List<int>> outgoing,
+            Vector2Int start,
+            bool[] visited,
+            out int edgeIndex)
+        {
+            if (outgoing.TryGetValue(start, out var edgeIndexes))
+            {
+                for (var i = 0; i < edgeIndexes.Count; i++)
+                {
+                    var candidate = edgeIndexes[i];
+                    if (!visited[candidate])
+                    {
+                        edgeIndex = candidate;
+                        return true;
+                    }
+                }
+            }
+
+            edgeIndex = -1;
+            return false;
+        }
+
+        private static int[] CreateFilledIntArray(int length, int value)
+        {
+            var values = new int[length];
+            for (var i = 0; i < values.Length; i++)
+            {
+                values[i] = value;
+            }
+
+            return values;
+        }
+
+        private void AddUnsupportedWallIslandCleanupStamp(
+            UnsupportedWallIsland island,
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float halfN)
+        {
+            if (island == null || island.Points == null || island.Points.Count < 3)
+            {
+                return;
+            }
+
+            wallDamageStamps.Add(CreateUnsupportedWallIslandCleanupStamp(normal, u, v, halfN, island.Points));
+        }
+
+        private static DamageStamp CreateUnsupportedWallIslandCleanupStamp(
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float halfN,
+            List<Vector2> sourcePoints)
+        {
+            var points = CreatePaddedUnsupportedIslandCleanupPoints(sourcePoints);
+            CalculatePolygonBounds(points, out var min, out var max);
+            return new DamageStamp
+            {
+                Normal = normal,
+                U = u,
+                V = v,
+                Plane = halfN + DamageContourInset,
+                Min = min,
+                Max = max,
+                Points = points,
+                RenderContour = false
+            };
+        }
+
+        private static Vector2[] CreatePaddedUnsupportedIslandCleanupPoints(List<Vector2> sourcePoints)
+        {
+            if (sourcePoints == null || sourcePoints.Count == 0)
+            {
+                return System.Array.Empty<Vector2>();
+            }
+
+            if (sourcePoints.Count == 4)
+            {
+                CalculatePolygonBounds(sourcePoints, out var rectMin, out var rectMax);
+                rectMin -= Vector2.one * UnsupportedIslandCleanupPadding;
+                rectMax += Vector2.one * UnsupportedIslandCleanupPadding;
+                return new[]
+                {
+                    new Vector2(rectMin.x, rectMin.y),
+                    new Vector2(rectMax.x, rectMin.y),
+                    new Vector2(rectMax.x, rectMax.y),
+                    new Vector2(rectMin.x, rectMax.y)
+                };
+            }
+
+            var centroid = CalculatePointAverage(sourcePoints);
+            var points = new Vector2[sourcePoints.Count];
+            for (var i = 0; i < sourcePoints.Count; i++)
+            {
+                var direction = sourcePoints[i] - centroid;
+                points[i] = direction.sqrMagnitude > 0.000001f
+                    ? sourcePoints[i] + direction.normalized * UnsupportedIslandCleanupPadding
+                    : sourcePoints[i];
+            }
+
+            return points;
+        }
+
+        private void SpawnContourOwnedWallHitSpray(DamageStamp stamp, Vector3 hitNormalWorld)
+        {
+            if (stamp == null || stamp.Points == null || stamp.Points.Length < 3)
+            {
+                return;
+            }
+
+            var points = new List<Vector2>(stamp.Points);
+            SanitizePolygonLoop(points);
+            if (points.Count < 3)
+            {
+                return;
+            }
+
+            var area = CalculateSignedPolygonArea(points);
+            if (area < 0f)
+            {
+                points.Reverse();
+                area = -area;
+            }
+
+            if (area <= 0.000001f)
+            {
+                return;
+            }
+
+            CalculatePolygonBounds(points, out var min, out var max);
+            var island = new UnsupportedWallIsland(
+                points,
+                CalculatePointAverage(points),
+                min,
+                max,
+                area);
+            var sprayDirectionWorld = hitNormalWorld.sqrMagnitude > 0.0001f
+                ? -hitNormalWorld.normalized
+                : transform.TransformDirection(-stamp.Normal);
+            var budget = 1;
+            SpawnWallMaterialSpray(
+                island,
+                stamp.Normal,
+                stamp.U,
+                stamp.V,
+                Mathf.Max(0f, stamp.Plane - DamageContourInset),
+                sprayDirectionWorld,
+                ref budget,
+                WallHitSprayMinChips,
+                WallHitSprayMaxChips);
+        }
+
+        private bool SpawnUnsupportedWallIslandSpray(
+            UnsupportedWallIsland island,
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float halfN,
+            Vector3 sprayDirectionWorld,
+            ref int sprayBudget)
+        {
+            return SpawnWallMaterialSpray(
+                island,
+                normal,
+                u,
+                v,
+                halfN,
+                sprayDirectionWorld,
+                ref sprayBudget,
+                UnsupportedIslandSprayMinChips,
+                UnsupportedIslandSprayMaxChips);
+        }
+
+        private bool SpawnWallMaterialSpray(
+            UnsupportedWallIsland island,
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float halfN,
+            Vector3 sprayDirectionWorld,
+            ref int sprayBudget,
+            int minChipCount,
+            int maxChipCount)
+        {
+            if (island == null || island.Points == null || island.Points.Count < 3 || sprayBudget <= 0)
+            {
+                return false;
+            }
+
+            var safeSprayDirectionWorld = sprayDirectionWorld.sqrMagnitude > 0.0001f
+                ? sprayDirectionWorld.normalized
+                : transform.TransformDirection(-normal);
+            var sprayDirectionLocal = transform.InverseTransformDirection(safeSprayDirectionWorld);
+            if (sprayDirectionLocal.sqrMagnitude <= 0.0001f)
+            {
+                sprayDirectionLocal = -normal;
+            }
+
+            sprayDirectionLocal.Normalize();
+            var seed = CalculateUnsupportedIslandSpraySeed(island, safeSprayDirectionWorld);
+            var chipCount = CalculateUnsupportedIslandSprayChipCount(island, seed, minChipCount, maxChipCount);
+            var centerLocal = u * island.Centroid.x + v * island.Centroid.y;
+            var burst = new GameObject("Wall Material Spray Burst");
+            burst.transform.position = transform.TransformPoint(centerLocal + sprayDirectionLocal * (halfN + UnsupportedIslandSpraySourceClearance));
+            burst.transform.rotation = Quaternion.identity;
+            var createdChips = 0;
+            var maxLifetime = 0f;
+            var material = GetUnclippedDestructibleBodyMaterial();
+            var outlineCategory = configuredOutlineCategory == StylizedOutlineCategory.None
+                ? StylizedOutlineCategory.Wall
+                : configuredOutlineCategory;
+            for (var i = 0; i < chipCount; i++)
+            {
+                var chipSeed = seed ^ (i * 73856093);
+                var chipSize = Mathf.Lerp(UnsupportedIslandSprayChipMinSize, UnsupportedIslandSprayChipMaxSize, Hash01(chipSeed ^ 0x531));
+                var chipDepth = chipSize * Mathf.Lerp(0.12f, 0.32f, Hash01(chipSeed ^ 0x93f));
+                var mesh = CreateUnsupportedIslandSprayChipMesh(chipSize, chipDepth, chipSeed);
+                if (mesh == null)
+                {
+                    continue;
+                }
+
+                var uv = SelectUnsupportedIslandSprayPoint(island, chipSeed, i);
+                var sideOffset = u * Mathf.Lerp(-0.035f, 0.035f, Hash01(chipSeed ^ 0x71)) +
+                    v * Mathf.Lerp(-0.035f, 0.035f, Hash01(chipSeed ^ 0x2b));
+                var spawnLocal = u * uv.x + v * uv.y + sideOffset +
+                    sprayDirectionLocal * (halfN + UnsupportedIslandSpraySourceClearance + Mathf.Lerp(0f, 0.035f, Hash01(chipSeed ^ 0x19)));
+
+                var chip = new GameObject("Wall Material Spray Chip");
+                chip.transform.SetParent(burst.transform, true);
+                chip.transform.position = transform.TransformPoint(spawnLocal);
+                chip.transform.rotation = CreateUnsupportedIslandSprayChipRotation(safeSprayDirectionWorld, transform.TransformDirection(v), chipSeed);
+                chip.transform.localScale = Vector3.one;
+
+                var meshFilter = chip.AddComponent<MeshFilter>();
+                meshFilter.sharedMesh = mesh;
+                var renderer = chip.AddComponent<MeshRenderer>();
+                renderer.sharedMaterial = material;
+                DroidRenderSetup.ApplyRenderer(renderer, outlineCategory);
+
+                var lateralLocal = u * Mathf.Lerp(-UnsupportedIslandSprayLateralSpread, UnsupportedIslandSprayLateralSpread, Hash01(chipSeed ^ 0x24c)) +
+                    v * Mathf.Lerp(-UnsupportedIslandSprayLateralSpread, UnsupportedIslandSprayLateralSpread, Hash01(chipSeed ^ 0x91d));
+                var speed = Mathf.Lerp(UnsupportedIslandSprayMinSpeed, UnsupportedIslandSprayMaxSpeed, Hash01(chipSeed ^ 0x681));
+                var velocity = safeSprayDirectionWorld * speed + transform.TransformDirection(lateralLocal);
+                var spinAxis = (safeSprayDirectionWorld + transform.TransformDirection(lateralLocal * 0.45f)).normalized;
+                var angularSpeed = Mathf.Lerp(260f, 760f, Hash01(chipSeed ^ 0x32f)) * (Hash01(chipSeed ^ 0x4e1) > 0.5f ? 1f : -1f);
+                var lifetime = Mathf.Lerp(UnsupportedIslandSprayMinLifetime, UnsupportedIslandSprayMaxLifetime, Hash01(chipSeed ^ 0x7aa));
+                chip.AddComponent<UnsupportedIslandSprayChipAnimation>().Initialize(velocity, spinAxis, angularSpeed, lifetime);
+                maxLifetime = Mathf.Max(maxLifetime, lifetime);
+                createdChips++;
+            }
+
+            if (createdChips == 0)
+            {
+                if (Application.isPlaying)
+                {
+                    Destroy(burst);
+                }
+                else
+                {
+                    DestroyImmediate(burst);
+                }
+
+                return false;
+            }
+
+            burst.AddComponent<UnsupportedIslandSprayBurstCleanup>().Initialize(maxLifetime + 0.08f);
+            sprayBudget--;
+            return true;
+        }
+
+        private int CalculateUnsupportedIslandSpraySeed(UnsupportedWallIsland island, Vector3 sprayDirectionWorld)
+        {
+            unchecked
+            {
+                var hash = 0x38d42f5;
+                hash = hash * 31 + HashPosition(transform.position);
+                hash = hash * 31 + wallDamageStamps.Count;
+                hash = hash * 31 + Mathf.RoundToInt(island.Centroid.x * 1000f);
+                hash = hash * 31 + Mathf.RoundToInt(island.Centroid.y * 1000f);
+                hash = hash * 31 + Mathf.RoundToInt(island.Area * 10000f);
+                hash = hash * 31 + Mathf.RoundToInt(sprayDirectionWorld.x * 100f);
+                hash = hash * 31 + Mathf.RoundToInt(sprayDirectionWorld.y * 100f);
+                hash = hash * 31 + Mathf.RoundToInt(sprayDirectionWorld.z * 100f);
+                return hash;
+            }
+        }
+
+        private static int CalculateUnsupportedIslandSprayChipCount(UnsupportedWallIsland island, int seed, int minChipCount, int maxChipCount)
+        {
+            var areaContribution = Mathf.FloorToInt(Mathf.Sqrt(Mathf.Max(0f, island.Area)) * 2.5f);
+            var seedContribution = Mathf.FloorToInt(Hash01(seed ^ 0x657) * 2f);
+            return Mathf.Clamp(Mathf.Max(1, minChipCount) + areaContribution + seedContribution, minChipCount, maxChipCount);
+        }
+
+        private static Vector2 SelectUnsupportedIslandSprayPoint(UnsupportedWallIsland island, int seed, int index)
+        {
+            if (island.Points == null || island.Points.Count == 0)
+            {
+                return island.Centroid;
+            }
+
+            var pointIndex = (int)(((uint)seed + (uint)index * 2654435761u) % (uint)island.Points.Count);
+            var blend = Mathf.Lerp(0.25f, 0.82f, Hash01(seed ^ (index * 0x45d9f3b)));
+            return Vector2.Lerp(island.Centroid, island.Points[pointIndex], blend);
+        }
+
+        private static Quaternion CreateUnsupportedIslandSprayChipRotation(Vector3 forward, Vector3 up, int seed)
+        {
+            var safeForward = forward.sqrMagnitude > 0.0001f ? forward.normalized : Vector3.forward;
+            var safeUp = up.sqrMagnitude > 0.0001f ? up.normalized : Vector3.up;
+            if (Vector3.Cross(safeForward, safeUp).sqrMagnitude <= 0.0001f)
+            {
+                safeUp = Mathf.Abs(Vector3.Dot(safeForward, Vector3.up)) < 0.95f ? Vector3.up : Vector3.right;
+            }
+
+            return Quaternion.LookRotation(safeForward, safeUp) *
+                Quaternion.Euler(
+                    Mathf.Lerp(-45f, 45f, Hash01(seed ^ 0x123)),
+                    Mathf.Lerp(-35f, 35f, Hash01(seed ^ 0x456)),
+                    Mathf.Lerp(0f, 360f, Hash01(seed ^ 0x789)));
+        }
+
+        private Mesh CreateUnsupportedIslandSprayChipMesh(float size, float depth, int seed)
+        {
+            var width = size * Mathf.Lerp(0.65f, 1.25f, Hash01(seed ^ 0x12c));
+            var height = size * Mathf.Lerp(0.45f, 1.05f, Hash01(seed ^ 0x45f));
+            var vertices = new List<Vector3>
+            {
+                new(-width, -height, 0f),
+                new(width * 0.9f, -height * 0.72f, 0f),
+                new(width * 0.35f, height, 0f),
+                new(-width * 0.72f, height * 0.48f, 0f),
+                new(Mathf.Lerp(-0.18f, 0.18f, Hash01(seed ^ 0x82a)) * width, Mathf.Lerp(-0.12f, 0.12f, Hash01(seed ^ 0x91b)) * height, -depth)
+            };
+            var triangles = new List<int>
+            {
+                0, 1, 2,
+                0, 2, 3,
+                0, 4, 1,
+                1, 4, 2,
+                2, 4, 3,
+                3, 4, 0
+            };
+            return CreateMesh("Wall Material Spray Chip Mesh", vertices, new[] { triangles });
         }
 
         private DamageStamp CreateContourOwnedWallDamageStamp(
@@ -1096,27 +2896,50 @@ namespace ArenaShooter
             }
 
             var stampCount = wallDamageStamps.Count;
+            var pointCount = CalculateWallDamageStampPointCount();
             EnsureWallDamageShaderBufferCapacity(
                 Mathf.Max(1, stampCount),
-                Mathf.Max(1, stampCount * DamageStampSegments));
+                Mathf.Max(1, pointCount));
 
             var stampBounds = new Vector4[Mathf.Max(1, stampCount)];
-            var stampPoints = new Vector4[Mathf.Max(1, stampCount * DamageStampSegments)];
+            var stampPointOffsets = new int[Mathf.Max(1, stampCount)];
+            var stampPointCounts = new int[Mathf.Max(1, stampCount)];
+            var stampPoints = new Vector4[Mathf.Max(1, pointCount)];
+            var pointOffset = 0;
             for (var stampIndex = 0; stampIndex < stampCount; stampIndex++)
             {
                 var stamp = wallDamageStamps[stampIndex];
                 stampBounds[stampIndex] = new Vector4(stamp.Min.x, stamp.Min.y, stamp.Max.x, stamp.Max.y);
-                for (var pointIndex = 0; pointIndex < DamageStampSegments; pointIndex++)
+                stampPointOffsets[stampIndex] = pointOffset;
+                var points = stamp.Points;
+                var count = points != null ? points.Length : 0;
+                stampPointCounts[stampIndex] = count;
+                for (var pointIndex = 0; pointIndex < count; pointIndex++)
                 {
-                    var point = stamp.Points[pointIndex];
-                    stampPoints[stampIndex * DamageStampSegments + pointIndex] = new Vector4(point.x, point.y, 0f, 0f);
+                    var point = points[pointIndex];
+                    stampPoints[pointOffset + pointIndex] = new Vector4(point.x, point.y, 0f, 0f);
                 }
+
+                pointOffset += count;
             }
 
             wallDamageStampBoundsBuffer.SetData(stampBounds);
+            wallDamageStampPointOffsetsBuffer.SetData(stampPointOffsets);
+            wallDamageStampPointCountsBuffer.SetData(stampPointCounts);
             wallDamageStampPointsBuffer.SetData(stampPoints);
             ApplyWallDamagePropertyBlock(combinedRenderer, stampCount, u, v);
             ApplyWallDamagePropertyBlock(outlineSourceRenderer, stampCount, u, v);
+        }
+
+        private int CalculateWallDamageStampPointCount()
+        {
+            var pointCount = 0;
+            for (var i = 0; i < wallDamageStamps.Count; i++)
+            {
+                pointCount += wallDamageStamps[i]?.Points?.Length ?? 0;
+            }
+
+            return pointCount;
         }
 
         private void EnsureWallDamageShaderBufferCapacity(int stampCapacity, int pointCapacity)
@@ -1126,6 +2949,20 @@ namespace ArenaShooter
                 wallDamageStampBoundsBuffer?.Release();
                 wallDamageStampBoundsCapacity = Mathf.Max(1, stampCapacity);
                 wallDamageStampBoundsBuffer = new ComputeBuffer(wallDamageStampBoundsCapacity, sizeof(float) * 4);
+            }
+
+            if (wallDamageStampPointOffsetsBuffer == null || wallDamageStampPointOffsetsCapacity < stampCapacity)
+            {
+                wallDamageStampPointOffsetsBuffer?.Release();
+                wallDamageStampPointOffsetsCapacity = Mathf.Max(1, stampCapacity);
+                wallDamageStampPointOffsetsBuffer = new ComputeBuffer(wallDamageStampPointOffsetsCapacity, sizeof(int));
+            }
+
+            if (wallDamageStampPointCountsBuffer == null || wallDamageStampPointCountsCapacity < stampCapacity)
+            {
+                wallDamageStampPointCountsBuffer?.Release();
+                wallDamageStampPointCountsCapacity = Mathf.Max(1, stampCapacity);
+                wallDamageStampPointCountsBuffer = new ComputeBuffer(wallDamageStampPointCountsCapacity, sizeof(int));
             }
 
             if (wallDamageStampPointsBuffer == null || wallDamageStampPointsCapacity < pointCapacity)
@@ -1147,10 +2984,11 @@ namespace ArenaShooter
             renderer.GetPropertyBlock(wallDamagePropertyBlock);
             wallDamagePropertyBlock.SetInt(WallDamageClipEnabledId, 1);
             wallDamagePropertyBlock.SetInt(WallDamageStampCountId, stampCount);
-            wallDamagePropertyBlock.SetInt(WallDamagePointCountId, DamageStampSegments);
             wallDamagePropertyBlock.SetVector(WallDamageUId, new Vector4(u.x, u.y, u.z, 0f));
             wallDamagePropertyBlock.SetVector(WallDamageVId, new Vector4(v.x, v.y, v.z, 0f));
             wallDamagePropertyBlock.SetBuffer(WallDamageStampBoundsId, wallDamageStampBoundsBuffer);
+            wallDamagePropertyBlock.SetBuffer(WallDamageStampPointOffsetsId, wallDamageStampPointOffsetsBuffer);
+            wallDamagePropertyBlock.SetBuffer(WallDamageStampPointCountsId, wallDamageStampPointCountsBuffer);
             wallDamagePropertyBlock.SetBuffer(WallDamageStampPointsId, wallDamageStampPointsBuffer);
             renderer.SetPropertyBlock(wallDamagePropertyBlock);
         }
@@ -1160,6 +2998,14 @@ namespace ArenaShooter
             wallDamageStampBoundsBuffer?.Release();
             wallDamageStampBoundsBuffer = null;
             wallDamageStampBoundsCapacity = 0;
+
+            wallDamageStampPointOffsetsBuffer?.Release();
+            wallDamageStampPointOffsetsBuffer = null;
+            wallDamageStampPointOffsetsCapacity = 0;
+
+            wallDamageStampPointCountsBuffer?.Release();
+            wallDamageStampPointCountsBuffer = null;
+            wallDamageStampPointCountsCapacity = 0;
 
             wallDamageStampPointsBuffer?.Release();
             wallDamageStampPointsBuffer = null;
@@ -1419,14 +3265,22 @@ namespace ArenaShooter
 
         private List<ContourSegment2D> GetVisibleContourOwnedWallSegments(float thickness)
         {
-            var result = new List<ContourSegment2D>();
             if (wallDamageStamps.Count == 0 ||
                 !TryGetContourOwnedWallBasis(0f, out _, out _, out _, out _, out var bounds))
             {
-                return result;
+                return new List<ContourSegment2D>();
             }
 
-            var rawSegments = BuildStampUnionDamageSegments(wallDamageStamps, thickness);
+            return BuildClippedVisibleContourSegments(bounds, thickness, true);
+        }
+
+        private List<ContourSegment2D> BuildClippedVisibleContourSegments(
+            DamageComponentPlaneBounds bounds,
+            float thickness,
+            bool removeSmallInteriorIslands)
+        {
+            var result = new List<ContourSegment2D>();
+            var rawSegments = BuildStampUnionDamageSegments(wallDamageStamps, thickness, false, removeSmallInteriorIslands);
             for (var i = 0; i < rawSegments.Count; i++)
             {
                 var segment = rawSegments[i];
@@ -1939,11 +3793,23 @@ namespace ArenaShooter
 
         private List<ContourSegment2D> BuildStampUnionDamageSegments(List<DamageStamp> stamps, float thickness)
         {
+            return BuildStampUnionDamageSegments(stamps, thickness, false, true);
+        }
+
+        private List<ContourSegment2D> BuildStampUnionDamageSegments(
+            List<DamageStamp> stamps,
+            float thickness,
+            bool includeNonContourOwners,
+            bool removeSmallInteriorIslands)
+        {
             var segments = new List<ContourSegment2D>();
             for (var stampIndex = 0; stampIndex < stamps.Count; stampIndex++)
             {
                 var stamp = stamps[stampIndex];
-                if (stamp == null || stamp.Points == null || stamp.Points.Length < 3)
+                if (stamp == null ||
+                    (!includeNonContourOwners && !stamp.RenderContour) ||
+                    stamp.Points == null ||
+                    stamp.Points.Length < 3)
                 {
                     continue;
                 }
@@ -1956,7 +3822,11 @@ namespace ArenaShooter
                 }
             }
 
-            RemoveSmallInteriorContourIslands(segments, stamps, thickness);
+            if (removeSmallInteriorIslands)
+            {
+                RemoveSmallInteriorContourIslands(segments, stamps, thickness);
+            }
+
             return segments;
         }
 
@@ -2126,7 +3996,7 @@ namespace ArenaShooter
             var count = 0;
             foreach (var stamp in stamps)
             {
-                if (stamp != null && stamp.RenderClosed)
+                if (stamp != null && stamp.RenderContour && stamp.RenderClosed)
                 {
                     count++;
                 }
@@ -2140,7 +4010,7 @@ namespace ArenaShooter
             var smallestStampSpan = float.PositiveInfinity;
             foreach (var stamp in stamps)
             {
-                if (stamp == null || !stamp.RenderClosed)
+                if (stamp == null || !stamp.RenderContour || !stamp.RenderClosed)
                 {
                     continue;
                 }
@@ -2150,6 +4020,176 @@ namespace ArenaShooter
             }
 
             return float.IsPositiveInfinity(smallestStampSpan) ? 0f : smallestStampSpan * 0.95f;
+        }
+
+        private static void SanitizePolygonLoop(List<Vector2> points)
+        {
+            for (var i = points.Count - 1; i >= 0; i--)
+            {
+                var next = (i + 1) % points.Count;
+                if ((points[i] - points[next]).sqrMagnitude <= 0.000001f)
+                {
+                    points.RemoveAt(i);
+                }
+            }
+
+            var changed = true;
+            while (changed && points.Count >= 3)
+            {
+                changed = false;
+                for (var i = points.Count - 1; i >= 0; i--)
+                {
+                    var previous = points[(i - 1 + points.Count) % points.Count];
+                    var current = points[i];
+                    var next = points[(i + 1) % points.Count];
+                    if (Mathf.Abs(Cross2D(current - previous, next - current)) <= 0.00001f)
+                    {
+                        points.RemoveAt(i);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        private static void CalculatePolygonBounds(List<Vector2> points, out Vector2 min, out Vector2 max)
+        {
+            min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
+            max = new Vector2(float.NegativeInfinity, float.NegativeInfinity);
+            for (var i = 0; i < points.Count; i++)
+            {
+                min = Vector2.Min(min, points[i]);
+                max = Vector2.Max(max, points[i]);
+            }
+        }
+
+        private static void CalculatePolygonBounds(Vector2[] points, out Vector2 min, out Vector2 max)
+        {
+            min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
+            max = new Vector2(float.NegativeInfinity, float.NegativeInfinity);
+            if (points == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < points.Length; i++)
+            {
+                min = Vector2.Min(min, points[i]);
+                max = Vector2.Max(max, points[i]);
+            }
+        }
+
+        private static Vector2 CalculatePointAverage(List<Vector2> points)
+        {
+            var average = Vector2.zero;
+            if (points == null || points.Count == 0)
+            {
+                return average;
+            }
+
+            for (var i = 0; i < points.Count; i++)
+            {
+                average += points[i];
+            }
+
+            return average / points.Count;
+        }
+
+        private static float CalculateSignedPolygonArea(List<Vector2> points)
+        {
+            var twiceArea = 0f;
+            for (var i = 0; i < points.Count; i++)
+            {
+                var next = (i + 1) % points.Count;
+                twiceArea += Cross2D(points[i], points[next]);
+            }
+
+            return twiceArea * 0.5f;
+        }
+
+        private static bool TryTriangulatePolygon(List<Vector2> points, List<int> triangles)
+        {
+            if (points == null || points.Count < 3 || triangles == null)
+            {
+                return false;
+            }
+
+            var remaining = new List<int>(points.Count);
+            for (var i = 0; i < points.Count; i++)
+            {
+                remaining.Add(i);
+            }
+
+            var guard = points.Count * points.Count;
+            while (remaining.Count > 3 && guard-- > 0)
+            {
+                var clippedEar = false;
+                for (var i = 0; i < remaining.Count; i++)
+                {
+                    var previous = remaining[(i - 1 + remaining.Count) % remaining.Count];
+                    var current = remaining[i];
+                    var next = remaining[(i + 1) % remaining.Count];
+                    if (!IsPolygonEar(points, remaining, previous, current, next))
+                    {
+                        continue;
+                    }
+
+                    triangles.Add(previous);
+                    triangles.Add(current);
+                    triangles.Add(next);
+                    remaining.RemoveAt(i);
+                    clippedEar = true;
+                    break;
+                }
+
+                if (!clippedEar)
+                {
+                    return false;
+                }
+            }
+
+            if (remaining.Count == 3)
+            {
+                triangles.Add(remaining[0]);
+                triangles.Add(remaining[1]);
+                triangles.Add(remaining[2]);
+            }
+
+            return triangles.Count >= 3;
+        }
+
+        private static bool IsPolygonEar(List<Vector2> points, List<int> remaining, int previous, int current, int next)
+        {
+            var a = points[previous];
+            var b = points[current];
+            var c = points[next];
+            if (Cross2D(b - a, c - b) <= 0.000001f)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < remaining.Count; i++)
+            {
+                var index = remaining[i];
+                if (index == previous || index == current || index == next)
+                {
+                    continue;
+                }
+
+                if (IsPointInsideTriangle(points[index], a, b, c))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IsPointInsideTriangle(Vector2 point, Vector2 a, Vector2 b, Vector2 c)
+        {
+            var ab = Cross2D(b - a, point - a);
+            var bc = Cross2D(c - b, point - b);
+            var ca = Cross2D(a - c, point - c);
+            return ab >= -0.000001f && bc >= -0.000001f && ca >= -0.000001f;
         }
 
         private static List<ContourSegmentGroup> BuildContourSegmentGroups(List<ContourSegment2D> segments, float snapStep)
@@ -2205,6 +4245,7 @@ namespace ArenaShooter
             group.Min = Vector2.Min(group.Min, Vector2.Min(segment.Start, segment.End));
             group.Max = Vector2.Max(group.Max, Vector2.Max(segment.Start, segment.End));
             group.MidpointSum += (segment.Start + segment.End) * 0.5f;
+            group.TotalLength += (segment.End - segment.Start).magnitude;
             AddGroupEndpoint(group, SnapContourPoint(segment.Start, snapStep));
             AddGroupEndpoint(group, SnapContourPoint(segment.End, snapStep));
         }
@@ -2352,6 +4393,30 @@ namespace ArenaShooter
 
             var inside = false;
             for (int i = 0, j = polygon.Length - 1; i < polygon.Length; j = i++)
+            {
+                var pi = polygon[i];
+                var pj = polygon[j];
+                var denominator = pj.y - pi.y;
+                if ((pi.y > point.y) != (pj.y > point.y) &&
+                    Mathf.Abs(denominator) > 0.000001f &&
+                    point.x < (pj.x - pi.x) * (point.y - pi.y) / denominator + pi.x)
+                {
+                    inside = !inside;
+                }
+            }
+
+            return inside;
+        }
+
+        private static bool IsPointInPolygon(Vector2 point, List<Vector2> polygon)
+        {
+            if (polygon == null || polygon.Count < 3)
+            {
+                return false;
+            }
+
+            var inside = false;
+            for (int i = 0, j = polygon.Count - 1; i < polygon.Count; j = i++)
             {
                 var pi = polygon[i];
                 var pj = polygon[j];
@@ -2783,30 +4848,5 @@ namespace ArenaShooter
             return material;
         }
 
-        private void SpawnImpactDebris(Vector3 hitPoint, Vector3 hitNormal, Material material, int count)
-        {
-            var safeNormal = hitNormal.sqrMagnitude > 0.001f ? hitNormal.normalized : Vector3.up;
-            for (var i = 0; i < count; i++)
-            {
-                var shard = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                shard.name = "Arena Bullet Chip";
-                shard.transform.position = hitPoint + safeNormal * Random.Range(0.04f, 0.11f) + Random.insideUnitSphere * 0.045f;
-                var size = Random.Range(0.045f, 0.13f);
-                shard.transform.localScale = new Vector3(size * Random.Range(0.7f, 1.45f), size * Random.Range(0.45f, 0.9f), size * Random.Range(0.7f, 1.45f));
-                shard.transform.rotation = Random.rotation;
-
-                if (material != null && shard.TryGetComponent<Renderer>(out var renderer))
-                {
-                    renderer.sharedMaterial = material;
-                }
-
-                var body = shard.AddComponent<Rigidbody>();
-                body.mass = 0.035f;
-                body.linearDamping = 0.25f;
-                body.AddForce((safeNormal + Random.insideUnitSphere * 0.5f + Vector3.up * 0.25f).normalized * Random.Range(0.7f, 1.8f), ForceMode.Impulse);
-                body.AddTorque(Random.insideUnitSphere * Random.Range(0.3f, 1.2f), ForceMode.Impulse);
-                Destroy(shard, Random.Range(1.8f, 3.2f));
-            }
-        }
     }
 }

@@ -154,8 +154,8 @@ MonoBehaviour:
       enabled: 1
       renderingLayerMask: 64
       outlineColor: {r: 0.12, g: 1.85, b: 2.25, a: 1}
-      hardEdgePixels: 0.75
-      glowPixels: 1.25
+      hardEdgePixels: 0.45
+      glowPixels: 0.85
       intensity: 0.96
       glowStrength: 0.16
       hardEdgeStrength: 0.98

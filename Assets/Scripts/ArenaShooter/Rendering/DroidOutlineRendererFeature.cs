@@ -846,8 +846,8 @@ namespace ArenaShooter.Rendering
             {
                 return new ResolvedOutlineStyle(
                     DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Gun),
-                    0.75f,
-                    1.25f,
+                    0.45f,
+                    0.85f,
                     0.96f,
                     0.16f,
                     0.98f,

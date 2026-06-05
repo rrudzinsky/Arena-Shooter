@@ -133,6 +133,7 @@ namespace ArenaShooter
         {
             public Vector3 Position;
             public GameObject Occupant;
+            public PickupKind? PreferredKind;
         }
 
         private sealed class ArmyUnitUpgradeState
@@ -2963,8 +2964,9 @@ namespace ArenaShooter
 
             var chosenSeed = randomizeSeed || seed == 0 ? Random.Range(1000, 999999) : seed;
             var totalArmies = allOutWarSettings.TotalArmies;
-            var activeBattleSize = Mathf.Max(allOutWarSettings.BattlefieldCap, totalArmies * AllOutWarSquadSize);
-            var warGridRadius = Mathf.Clamp(Mathf.CeilToInt(Mathf.Sqrt(activeBattleSize) * 0.38f) + 3, 4, 9);
+            var baseWarGridRadius = CalculateAllOutWarGridRadius(totalArmies, allOutWarSettings.BattlefieldCap);
+            var terrainGridBonus = ArenaGenerator.EstimateAllOutWarTerrainGridBonus(chosenSeed, roomSize + corridorLength);
+            var warGridRadius = Mathf.Clamp(baseWarGridRadius + terrainGridBonus, 4, 9);
             var warRoomCount = Mathf.Clamp(Mathf.CeilToInt(Mathf.PI * warGridRadius * warGridRadius), 24, 260);
             var layout = generator.GenerateAllOutWar(theme, matchRoot.transform, chosenSeed, totalArmies, warRoomCount, warGridRadius, roomSize, corridorLength, corridorWidth, wallHeight, weaponPickupCount + healthPickupCount);
             currentLayout = layout;
@@ -2996,6 +2998,14 @@ namespace ArenaShooter
             SpawnInitialAllOutWarSoldiers(layout, player.transform);
             StartCoroutine(RunAllOutWarPickupRefillLoop());
             waveRoutine = StartCoroutine(RunAllOutWarLoop(player.transform, layout));
+        }
+
+        private static int CalculateAllOutWarGridRadius(int totalArmies, int battlefieldCap)
+        {
+            var activeBattleSize = Mathf.Max(Mathf.Max(1, battlefieldCap), Mathf.Max(1, totalArmies) * AllOutWarSquadSize);
+            var capRadius = Mathf.CeilToInt(Mathf.Sqrt(activeBattleSize) * 0.30f) + 3;
+            var armyMinimum = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(1, totalArmies) * 0.55f) + 1, 4, 7);
+            return Mathf.Clamp(Mathf.Max(capRadius, armyMinimum), 4, 8);
         }
 
         private void BeginGateIntro(GameObject actor, ArenaGateSpawn gate, float walkSpeed)
@@ -4337,34 +4347,56 @@ namespace ArenaShooter
         {
             var rooms = GetAllOutWarResourceRooms(layout, false);
             ShuffleList(rooms);
-            var targetCount = CalculateAllOutWarPickupPadCount(layout, rooms.Count);
-            for (var i = 0; i < rooms.Count && i < targetCount; i++)
+            var plannedKinds = BuildAllOutWarPickupKindPlan(rooms.Count);
+            var kindIndex = 0;
+            for (var i = 0; i < rooms.Count && kindIndex < plannedKinds.Count; i++)
             {
                 if (!TryPickAllOutWarResourcePosition(layout, rooms[i].Value, 0.72f, 3.35f, out var position))
                 {
                     continue;
                 }
 
-                var slot = CreatePickupPadSlot(position);
-                SpawnPickupOnPad(slot, ChooseAllOutWarPickupKind());
+                var kind = plannedKinds[kindIndex++];
+                var slot = CreatePickupPadSlot(position, kind);
+                SpawnPickupOnPad(slot, kind);
             }
         }
 
-        private int CalculateAllOutWarPickupPadCount(ArenaLayout layout, int eligibleRoomCount)
+        private List<PickupKind> BuildAllOutWarPickupKindPlan(int eligibleRoomCount)
         {
+            var kinds = new List<PickupKind>();
             if (eligibleRoomCount <= 0)
             {
-                return 0;
+                return kinds;
             }
 
             var armies = allOutWarSettings != null ? allOutWarSettings.TotalArmies : Mathf.Max(2, AllOutWarArmyCount);
             var activeCap = allOutWarSettings != null ? Mathf.Max(1, allOutWarSettings.BattlefieldCap) : 24;
-            var roomScale = layout != null ? layout.RoomCenters.Count : eligibleRoomCount;
-            var radiusScale = layout != null ? layout.CircularRadius / Mathf.Max(1f, roomSize + corridorLength) : 0f;
-            var desired = Mathf.CeilToInt(armies * 3.2f + activeCap / 12f + roomScale * 0.18f + radiusScale * 0.65f);
-            var minimum = Mathf.Min(eligibleRoomCount, Mathf.Max(6, armies * 2));
-            var maximum = Mathf.Min(eligibleRoomCount, Mathf.Max(12, Mathf.CeilToInt(eligibleRoomCount * 0.48f)));
-            return Mathf.Clamp(desired, minimum, maximum);
+            var desired = Mathf.CeilToInt(armies * 4.5f + activeCap / 7f + eligibleRoomCount * 0.42f);
+            var minimum = Mathf.Min(eligibleRoomCount, Mathf.Max(10, armies * 4 + Mathf.CeilToInt(activeCap / 18f)));
+            var maximum = Mathf.Min(eligibleRoomCount, Mathf.Max(minimum, Mathf.CeilToInt(eligibleRoomCount * 0.72f)));
+            var totalPads = Mathf.Clamp(desired, minimum, maximum);
+            var weaponPads = Mathf.Min(totalPads, Mathf.Clamp(Mathf.CeilToInt(armies * 0.75f + activeCap / 160f), 2, 8));
+            var supportBonus = Mathf.Clamp(Mathf.CeilToInt(armies * 0.35f + activeCap / 140f), 1, 6);
+            supportBonus = Mathf.Min(supportBonus, Mathf.Max(0, eligibleRoomCount - totalPads));
+            totalPads += supportBonus;
+            var supportPads = Mathf.Max(0, totalPads - weaponPads);
+            var ammoPads = Mathf.CeilToInt(supportPads * 0.55f);
+            var healthPads = Mathf.Max(0, supportPads - ammoPads);
+
+            AddPickupKinds(kinds, PickupKind.Weapon, weaponPads);
+            AddPickupKinds(kinds, PickupKind.Ammo, ammoPads);
+            AddPickupKinds(kinds, PickupKind.Health, healthPads);
+            ShuffleList(kinds);
+            return kinds;
+        }
+
+        private static void AddPickupKinds(List<PickupKind> kinds, PickupKind kind, int count)
+        {
+            for (var i = 0; i < count; i++)
+            {
+                kinds.Add(kind);
+            }
         }
 
         private void CreateAllOutWarHealthItems(ArenaLayout layout)
@@ -5350,11 +5382,12 @@ namespace ArenaShooter
             SpawnPickupOnPad(slot, PickupKind.Health);
         }
 
-        private PickupPadSlot CreatePickupPadSlot(Vector3 position)
+        private PickupPadSlot CreatePickupPadSlot(Vector3 position, PickupKind? preferredKind = null)
         {
             var slot = new PickupPadSlot
             {
-                Position = position
+                Position = position,
+                PreferredKind = preferredKind
             };
             pickupPadSlots.Add(slot);
             return slot;
@@ -5376,7 +5409,8 @@ namespace ArenaShooter
                     continue;
                 }
 
-                SpawnPickupOnPad(slot, useAllOutWarWeights ? ChooseAllOutWarPickupKind() : ChooseRandomPickupKind());
+                var kind = slot.PreferredKind ?? (useAllOutWarWeights ? ChooseAllOutWarPickupKind() : ChooseRandomPickupKind());
+                SpawnPickupOnPad(slot, kind);
             }
         }
 

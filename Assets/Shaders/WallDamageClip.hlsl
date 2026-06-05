@@ -3,8 +3,9 @@
 
 StructuredBuffer<float4> _WallDamageStampBounds;
 StructuredBuffer<float4> _WallDamageStampPoints;
+StructuredBuffer<int> _WallDamageStampPointOffsets;
+StructuredBuffer<int> _WallDamageStampPointCounts;
 int _WallDamageStampCount;
-int _WallDamagePointCount;
 int _WallDamageClipEnabled;
 float4 _WallDamageU;
 float4 _WallDamageV;
@@ -23,9 +24,15 @@ bool ArenaPointInsideWallDamageStamp(float2 sampleUv, int stampIndex)
     }
 
     bool inside = false;
-    int pointBase = stampIndex * _WallDamagePointCount;
-    float2 previous = _WallDamageStampPoints[pointBase + _WallDamagePointCount - 1].xy;
-    for (int i = 0; i < _WallDamagePointCount; i++)
+    int pointCount = _WallDamageStampPointCounts[stampIndex];
+    if (pointCount < 3)
+    {
+        return false;
+    }
+
+    int pointBase = _WallDamageStampPointOffsets[stampIndex];
+    float2 previous = _WallDamageStampPoints[pointBase + pointCount - 1].xy;
+    for (int i = 0; i < pointCount; i++)
     {
         float2 current = _WallDamageStampPoints[pointBase + i].xy;
         float denominator = previous.y - current.y;

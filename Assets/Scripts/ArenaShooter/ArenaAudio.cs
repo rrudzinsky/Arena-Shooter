@@ -31,6 +31,8 @@ namespace ArenaShooter
 
         public static ArenaAudio Instance { get; private set; }
 
+        public bool IsGameplayMusicPlaying => musicSource != null && musicSource.isPlaying;
+
         private void Awake()
         {
             Instance = this;
@@ -141,6 +143,25 @@ namespace ArenaShooter
             {
                 cheerSource.volume = ScaleSfxVolume(currentCheerRawVolume);
             }
+        }
+
+        public bool TryGetGameplayMusicSpectrum(float[] samples)
+        {
+            if (samples == null || samples.Length == 0 || musicSource == null || !musicSource.isPlaying)
+            {
+                return false;
+            }
+
+            musicSource.GetSpectrumData(samples, 0, FFTWindow.BlackmanHarris);
+            for (var i = 0; i < samples.Length; i++)
+            {
+                if (samples[i] > 0.00001f)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void PlayCrowdExcited()
