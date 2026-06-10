@@ -144,6 +144,11 @@ namespace ArenaShooter
         private MeshRenderer damageContourRenderer;
         private MeshFilter interiorBridgeMeshFilter;
         private MeshRenderer interiorBridgeRenderer;
+        private Vector3 forcedWallNormalLocal = Vector3.zero;
+        private DestructibleArenaPiece axisSlabX;
+        private DestructibleArenaPiece axisSlabZ;
+        private DestructibleArenaPiece structuralFallSibling;
+        private bool isPillarRouter;
         private BoxCollider surfaceCollider;
         private Vector3Int chunkCounts;
         private bool initialized;
@@ -565,10 +570,120 @@ namespace ArenaShooter
                 ? transform.InverseTransformDirection(biteDirectionWorld.normalized)
                 : Vector3.zero;
 
+            if (profile == DestructibleDamageProfile.CornerPillar && UsesStructuralWallOutlineSource())
+            {
+                InitializePillarRouter();
+                return;
+            }
+
             if (UsesContourOwnedWallDamage() || ShouldInitializeStartupStructuralWallBody())
             {
                 InitializeChunks();
             }
+        }
+
+        private void InitializePillarRouter()
+        {
+            if (isPillarRouter)
+            {
+                return;
+            }
+
+            isPillarRouter = true;
+            initialized = true;
+            var originalRenderers = GetOriginalSourceRenderers();
+            intactMaterial = configuredIntactMaterial != null ? configuredIntactMaterial : ResolveLargestRendererMaterial(originalRenderers);
+            var sourceSize = GetSourceSize();
+            foreach (var renderer in originalRenderers)
+            {
+                renderer.enabled = false;
+            }
+
+            foreach (var collider in GetComponentsInChildren<Collider>(true))
+            {
+                collider.enabled = false;
+            }
+
+            transform.localScale = Vector3.one;
+            surfaceCollider = gameObject.AddComponent<BoxCollider>();
+            surfaceCollider.size = sourceSize;
+            surfaceCollider.center = Vector3.zero;
+
+            axisSlabX = CreatePillarAxisSlab("Pillar Axis X Damage", sourceSize, Vector3.right);
+            axisSlabZ = CreatePillarAxisSlab("Pillar Axis Z Damage", sourceSize, Vector3.forward);
+            axisSlabX.structuralFallSibling = axisSlabZ;
+            axisSlabZ.structuralFallSibling = axisSlabX;
+        }
+
+        private DestructibleArenaPiece CreatePillarAxisSlab(string slabName, Vector3 sourceSize, Vector3 wallNormalLocal)
+        {
+            var slab = new GameObject(slabName);
+            slab.transform.SetParent(transform, false);
+            var piece = slab.AddComponent<DestructibleArenaPiece>();
+            piece.forcedWallNormalLocal = wallNormalLocal;
+            piece.Configure(maxHealth, sourceSize, intactMaterial, configuredOutlineCategory, DestructibleDamageProfile.Wall, Vector3.zero);
+            var slabCollider = slab.GetComponent<BoxCollider>();
+            if (slabCollider != null)
+            {
+                slabCollider.enabled = false;
+            }
+
+            return piece;
+        }
+
+        private DestructibleArenaPiece ResolvePillarAxisSlab(Vector3 hitNormalWorld)
+        {
+            var localNormal = transform.InverseTransformDirection(
+                hitNormalWorld.sqrMagnitude > 0.001f ? hitNormalWorld.normalized : Vector3.forward);
+            return Mathf.Abs(localNormal.x) >= Mathf.Abs(localNormal.z) ? axisSlabX : axisSlabZ;
+        }
+
+        private void MirrorStructuralFallToSibling(UnsupportedWallIsland island, Vector3 u, Vector3 v)
+        {
+            if (structuralFallSibling == null || island == null || island.Points == null || island.Points.Count < 3)
+            {
+                return;
+            }
+
+            var minY = float.PositiveInfinity;
+            var maxY = float.NegativeInfinity;
+            for (var i = 0; i < island.Points.Count; i++)
+            {
+                var local = u * island.Points[i].x + v * island.Points[i].y;
+                minY = Mathf.Min(minY, local.y);
+                maxY = Mathf.Max(maxY, local.y);
+            }
+
+            if (maxY - minY <= 0.01f)
+            {
+                return;
+            }
+
+            structuralFallSibling.RemoveFullWidthBand(minY, maxY);
+        }
+
+        private void RemoveFullWidthBand(float minLocalY, float maxLocalY)
+        {
+            if (!UsesContourOwnedWallDamage() ||
+                !TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out var bounds))
+            {
+                return;
+            }
+
+            var uIsVertical = Mathf.Abs(Vector3.Dot(u, Vector3.up)) > 0.5f;
+            var minU = uIsVertical ? minLocalY : bounds.MinU - 0.05f;
+            var maxU = uIsVertical ? maxLocalY : bounds.MaxU + 0.05f;
+            var minV = uIsVertical ? bounds.MinV - 0.05f : minLocalY;
+            var maxV = uIsVertical ? bounds.MaxV + 0.05f : maxLocalY;
+            var points = new List<Vector2>
+            {
+                new(minU, minV),
+                new(maxU, minV),
+                new(maxU, maxV),
+                new(minU, maxV)
+            };
+            wallDamageStamps.Add(CreateUnsupportedWallIslandCleanupStamp(normal, u, v, halfN, points));
+            RebuildCombinedMesh();
         }
 
         private void OnDestroy()
@@ -590,6 +705,12 @@ namespace ArenaShooter
         {
             if (amount <= 0f)
             {
+                return;
+            }
+
+            if (isPillarRouter && axisSlabX != null && axisSlabZ != null)
+            {
+                ResolvePillarAxisSlab(hitNormal).TakeDamage(amount, hitPoint, hitNormal, hitCollider);
                 return;
             }
 
@@ -627,6 +748,11 @@ namespace ArenaShooter
                 return false;
             }
 
+            if (isPillarRouter && axisSlabX != null && axisSlabZ != null)
+            {
+                return ResolvePillarAxisSlab(hitNormal).AllowsProjectilePassThrough(hitPoint, hitNormal);
+            }
+
             if (UsesContourOwnedWallDamage())
             {
                 var localPoint = transform.InverseTransformPoint(hitPoint);
@@ -645,6 +771,16 @@ namespace ArenaShooter
         public bool TryResolvePlayerVault(Vector3 playerPosition, Vector3 playerForward, float playerRadius, float playerHeight, out PlayerVaultSolution solution)
         {
             solution = default;
+            if (isPillarRouter)
+            {
+                if (axisSlabX != null && axisSlabX.TryResolvePlayerVault(playerPosition, playerForward, playerRadius, playerHeight, out solution))
+                {
+                    return true;
+                }
+
+                return axisSlabZ != null && axisSlabZ.TryResolvePlayerVault(playerPosition, playerForward, playerRadius, playerHeight, out solution);
+            }
+
             if (!initialized ||
                 damageProfile != DestructibleDamageProfile.Wall ||
                 configuredOutlineCategory == StylizedOutlineCategory.Floor ||
@@ -1300,6 +1436,11 @@ namespace ArenaShooter
 
         private Vector3 GetWallNormalLocal()
         {
+            if (forcedWallNormalLocal.sqrMagnitude > 0.5f)
+            {
+                return forcedWallNormalLocal;
+            }
+
             var sourceSize = GetSourceSize();
             return sourceSize.x <= sourceSize.z ? Vector3.right : Vector3.forward;
         }
@@ -1479,8 +1620,12 @@ namespace ArenaShooter
 
             var localHit = transform.InverseTransformPoint(hitPoint);
             var center = new Vector2(Vector3.Dot(localHit, u), Vector3.Dot(localHit, v));
-            var halfU = Mathf.Max(0.12f, bounds.Width / Mathf.Max(1, CalculateCellCount(bounds.Width)) * 0.5f);
-            var halfV = Mathf.Max(0.12f, bounds.Height / Mathf.Max(1, CalculateCellCount(bounds.Height)) * 0.5f);
+            var halfU = Mathf.Min(
+                Mathf.Max(0.12f, bounds.Width / Mathf.Max(1, CalculateCellCount(bounds.Width)) * 0.5f),
+                bounds.Width * 0.21f);
+            var halfV = Mathf.Min(
+                Mathf.Max(0.12f, bounds.Height / Mathf.Max(1, CalculateCellCount(bounds.Height)) * 0.5f),
+                bounds.Height * 0.21f);
             var stamp = CreateContourOwnedWallDamageStamp(
                 center,
                 normal,
@@ -1530,6 +1675,7 @@ namespace ArenaShooter
                     {
                         AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
                         SpawnFallingWallSlab(island, normal, u, v, halfN, ref slabBudget);
+                        MirrorStructuralFallToSibling(island, u, v);
                         removedAnyIsland = true;
                         continue;
                     }
@@ -1543,6 +1689,7 @@ namespace ArenaShooter
                     {
                         AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
                         SpawnFallingWallSlab(island, normal, u, v, halfN, ref slabBudget);
+                        MirrorStructuralFallToSibling(island, u, v);
                         removedAnyIsland = true;
                     }
                 }
@@ -1935,6 +2082,7 @@ namespace ArenaShooter
 
                     AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
                     SpawnFallingWallSlab(island, normal, u, v, halfN, ref slabBudget);
+                    MirrorStructuralFallToSibling(island, u, v);
                     if (island.RequiresSpray && sprayBudget > 0)
                     {
                         SpawnUnsupportedWallIslandSpray(island, normal, u, v, halfN, sprayDirectionWorld, ref sprayBudget);
@@ -2042,6 +2190,7 @@ namespace ArenaShooter
                     {
                         AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
                         SpawnFallingWallSlab(island, normal, u, v, halfN, ref slabBudget);
+                        MirrorStructuralFallToSibling(island, u, v);
                         if (island.RequiresSpray && sprayBudget > 0)
                         {
                             SpawnUnsupportedWallIslandSpray(island, normal, u, v, halfN, sprayDirectionWorld, ref sprayBudget);

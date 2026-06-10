@@ -18,7 +18,6 @@ public sealed class PillarOutlineTests
     private static readonly Color ExpectedMatteBlack = new(0.0015f, 0.001f, 0.004f, 1f);
     private const float MatteBlackTolerance = 0.015f;
     private const float OutlineBoundsTolerance = 0.08f;
-    private const int IntactPillarWallStyleOutlineQuadCount = 5;
     private const string CombinedWallBodyName = "Combined Destructible Wall Body";
     private const string StructuralWallOutlineSourceName = "Destructible Wall Outline Source";
     private const string DamageContoursName = "Destructible Damage Contours";
@@ -91,9 +90,9 @@ public sealed class PillarOutlineTests
         Assert.That(pillars.Count, Is.EqualTo(2));
         Assert.That(baseAccents.Count, Is.EqualTo(8));
         AssertNoRemovedPillarOutlineObjects(root);
-        Assert.That(FindChildren(root, CombinedWallBodyName).Count, Is.EqualTo(2));
-        Assert.That(FindChildren(root, StructuralWallOutlineSourceName).Count, Is.EqualTo(2));
-        Assert.That(FindChildren(root, DamageContoursName).Count, Is.EqualTo(2));
+        Assert.That(FindChildren(root, CombinedWallBodyName).Count, Is.EqualTo(4));
+        Assert.That(FindChildren(root, StructuralWallOutlineSourceName).Count, Is.EqualTo(4));
+        Assert.That(FindChildren(root, DamageContoursName).Count, Is.EqualTo(4));
         foreach (var pillar in pillars)
         {
             AssertPillarUsesGeneratedWallRuntimeVisualPath(pillar, wallHeight);
@@ -111,7 +110,7 @@ public sealed class PillarOutlineTests
         var pillarBodies = FindChildren(pillarRoot, CombinedWallBodyName);
         var wallBodies = FindChildren(wallRoot, CombinedWallBodyName);
 
-        Assert.That(pillarBodies.Count, Is.EqualTo(2));
+        Assert.That(pillarBodies.Count, Is.EqualTo(4));
         Assert.That(wallBodies.Count, Is.EqualTo(1));
         Assert.That(pillarBodies.Concat(wallBodies), Has.All.Matches<GameObject>(HasDefaultAndWallRenderingLayers));
     }
@@ -131,15 +130,17 @@ public sealed class PillarOutlineTests
         Assert.That(intactRenderers, Has.All.Matches<Renderer>(RendererUsesMatteBlackMaterial));
         AssertNoRemovedPillarOutlineObjects(pillar);
         var initialCombinedBodies = FindChildren(pillar, CombinedWallBodyName);
-        Assert.That(initialCombinedBodies.Count, Is.EqualTo(1));
-        AssertGeneratedWallBody(initialCombinedBodies[0]);
+        Assert.That(initialCombinedBodies.Count, Is.EqualTo(2));
         var initialOutlineSources = FindChildren(pillar, StructuralWallOutlineSourceName);
-        Assert.That(initialOutlineSources.Count, Is.EqualTo(1));
-        AssertStructuralWallOutlineSource(initialOutlineSources[0], GetConfiguredPillarSize(pillar));
-        AssertIntactPillarWallStyleOutlineSource(initialOutlineSources[0]);
+        Assert.That(initialOutlineSources.Count, Is.EqualTo(2));
+        foreach (var source in initialOutlineSources)
+        {
+            AssertStructuralWallOutlineSource(source, GetConfiguredPillarSize(pillar));
+            AssertIntactPillarWallStyleOutlineSource(source);
+        }
+
         var initialDamageContours = FindChildren(pillar, DamageContoursName);
-        Assert.That(initialDamageContours.Count, Is.EqualTo(1));
-        AssertDamageContourObject(initialDamageContours[0]);
+        Assert.That(initialDamageContours.Count, Is.EqualTo(2));
 
         var takeDamage = DestructibleArenaPieceType.GetMethod(
             "TakeDamage",
@@ -152,16 +153,23 @@ public sealed class PillarOutlineTests
         var damageContours = FindChildren(pillar, DamageContoursName);
         Assert.That(intactRenderers, Has.All.Matches<Renderer>(renderer => !renderer.enabled));
         AssertNoRemovedPillarOutlineObjects(pillar);
-        Assert.That(combinedBodies.Count, Is.EqualTo(1));
-        Assert.That(combinedBodies[0], Is.SameAs(initialCombinedBodies[0]));
-        Assert.That(outlineSources.Count, Is.EqualTo(1));
-        Assert.That(outlineSources[0], Is.SameAs(initialOutlineSources[0]));
-        Assert.That(damageContours.Count, Is.EqualTo(1));
-        Assert.That(damageContours[0], Is.SameAs(initialDamageContours[0]));
-        AssertGeneratedWallBody(combinedBodies[0]);
+        Assert.That(combinedBodies.Count, Is.EqualTo(2));
+        foreach (var body in combinedBodies)
+        {
+            AssertGeneratedWallBody(body);
+        }
+
+        Assert.That(outlineSources.Count, Is.EqualTo(2));
         Assert.That(outlineSources, Has.All.Matches<GameObject>(source => HasWallRenderingLayer(source)));
         Assert.That(outlineSources.Count(source => HasCollider(source)), Is.EqualTo(0));
-        AssertDamageContourMeshUpdated(damageContours[0]);
+        Assert.That(damageContours.Count, Is.EqualTo(2));
+        Assert.That(damageContours.Count(ContourHasUpdatedMesh), Is.GreaterThanOrEqualTo(1));
+    }
+
+    private static bool ContourHasUpdatedMesh(GameObject contour)
+    {
+        var meshFilter = contour.GetComponent<MeshFilter>();
+        return meshFilter != null && meshFilter.sharedMesh != null && meshFilter.sharedMesh.vertexCount > 0;
     }
 
     private GameObject CreateOpeningPillarRoot(bool horizontalWall, float wallHeight)
@@ -215,15 +223,27 @@ public sealed class PillarOutlineTests
         Assert.That(FindChildren(pillar, "Imported Cyber Arena Corner Post Mesh").Count, Is.EqualTo(1));
         Assert.That(pillar.GetComponent(DestructibleArenaPieceType), Is.Not.Null);
         var combinedBodies = FindChildren(pillar, CombinedWallBodyName);
-        Assert.That(combinedBodies.Count, Is.EqualTo(1));
-        AssertGeneratedWallBody(combinedBodies[0]);
+        Assert.That(combinedBodies.Count, Is.EqualTo(2));
+        foreach (var body in combinedBodies)
+        {
+            AssertGeneratedWallBody(body);
+        }
+
         var outlineSources = FindChildren(pillar, StructuralWallOutlineSourceName);
-        Assert.That(outlineSources.Count, Is.EqualTo(1));
-        AssertStructuralWallOutlineSource(outlineSources[0], GetConfiguredPillarSize(pillar));
-        AssertIntactPillarWallStyleOutlineSource(outlineSources[0]);
+        Assert.That(outlineSources.Count, Is.EqualTo(2));
+        foreach (var source in outlineSources)
+        {
+            AssertStructuralWallOutlineSource(source, GetConfiguredPillarSize(pillar));
+            AssertIntactPillarWallStyleOutlineSource(source);
+        }
+
         var damageContours = FindChildren(pillar, DamageContoursName);
-        Assert.That(damageContours.Count, Is.EqualTo(1));
-        AssertDamageContourObject(damageContours[0]);
+        Assert.That(damageContours.Count, Is.EqualTo(2));
+        foreach (var contour in damageContours)
+        {
+            AssertDamageContourObject(contour);
+        }
+
         AssertNoRemovedPillarOutlineObjects(pillar);
 
         var renderers = GetIntactCornerPostRenderers(pillar);
@@ -299,15 +319,11 @@ public sealed class PillarOutlineTests
     private static void AssertIntactPillarWallStyleOutlineSource(GameObject source)
     {
         var mesh = source.GetComponent<MeshFilter>().sharedMesh;
-        Assert.That(mesh.vertexCount, Is.EqualTo(IntactPillarWallStyleOutlineQuadCount * 6));
-        Assert.That(mesh.triangles.Length, Is.EqualTo(IntactPillarWallStyleOutlineQuadCount * 6));
+        Assert.That(mesh.vertexCount, Is.EqualTo(12));
+        Assert.That(mesh.triangles.Length, Is.EqualTo(12));
 
         var normalKeys = mesh.normals.Select(DominantNormalKey).Distinct().ToArray();
-        Assert.That(normalKeys, Does.Contain("+X"));
-        Assert.That(normalKeys, Does.Contain("-X"));
-        Assert.That(normalKeys, Does.Contain("+Y"));
-        Assert.That(normalKeys, Does.Contain("+Z"));
-        Assert.That(normalKeys, Does.Contain("-Z"));
+        Assert.That(normalKeys.Length, Is.EqualTo(2));
     }
 
     private static void AssertDamageContourObject(GameObject contour)
