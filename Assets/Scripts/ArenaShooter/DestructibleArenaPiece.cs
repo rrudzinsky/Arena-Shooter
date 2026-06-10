@@ -150,6 +150,7 @@ namespace ArenaShooter
         private DestructibleArenaPiece structuralFallSibling;
         private bool isPillarRouter;
         private bool suppressSurvivingColliders;
+        private bool applyingMirroredStructuralFall;
         private GameObject survivingColliderRoot;
         private BoxCollider surfaceCollider;
         private Vector3Int chunkCounts;
@@ -599,7 +600,11 @@ namespace ArenaShooter
 
         private void MirrorStructuralFallToSibling(UnsupportedWallIsland island, Vector3 u, Vector3 v)
         {
-            if (structuralFallSibling == null || island == null || island.Points == null || island.Points.Count < 3)
+            if (applyingMirroredStructuralFall ||
+                structuralFallSibling == null ||
+                island == null ||
+                island.Points == null ||
+                island.Points.Count < 3)
             {
                 return;
             }
@@ -642,6 +647,9 @@ namespace ArenaShooter
                 new(minU, maxV)
             };
             wallDamageStamps.Add(CreateUnsupportedWallIslandCleanupStamp(normal, u, v, halfN, points));
+            applyingMirroredStructuralFall = true;
+            RemoveUnsupportedContourOwnedWallIslands();
+            applyingMirroredStructuralFall = false;
             RebuildCombinedMesh();
         }
 
