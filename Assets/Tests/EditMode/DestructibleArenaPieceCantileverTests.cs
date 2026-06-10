@@ -62,14 +62,14 @@ public sealed class DestructibleArenaPieceCantileverTests
     [Test]
     public void LongThinSpikeFromFloorColumnBreaksOffBeyondSupportableStub()
     {
-        AddRectStamp(-4.2f, 5f, 0.4f, 3f);
-        AddRectStamp(-4.2f, 5f, -3f, -0.4f);
-        AddRectStamp(-1.2f, 5f, -0.45f, 0.45f);
+        AddRectStamp(-3f, 5f, 0.4f, 3f);
+        AddRectStamp(-3f, 5f, -3f, -0.4f);
+        AddRectStamp(0.5f, 5f, -0.45f, 0.45f);
 
         InvokeRemoveUnsupportedWallIslands();
 
-        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-1.5f, 0f)), Is.True);
-        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-3f, 0f)), Is.False);
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-0.5f, 0f)), Is.True);
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-2f, 0f)), Is.False);
         Assert.That(CountHiddenCleanupStamps(), Is.GreaterThanOrEqualTo(1));
         Assert.That(GameObject.Find("Falling Wall Slab"), Is.Not.Null);
     }
@@ -108,6 +108,40 @@ public sealed class DestructibleArenaPieceCantileverTests
 
         Assert.That(GetBridgeSegmentCount(), Is.GreaterThan(0));
         Assert.That(GetVisibleSegmentCount(), Is.Zero);
+    }
+
+    [Test]
+    public void TallPieceOnThinPedestalSliverFalls()
+    {
+        AddRectStamp(-5f, 5f, 2.5f, 3f);
+        AddRectStamp(-5f, -1f, -1f, 2.5f);
+        AddRectStamp(1f, 5f, -1f, 2.5f);
+        AddRectStamp(-1f, -0.1f, -1f, -0.4f);
+        AddRectStamp(0.1f, 1f, -1f, -0.4f);
+
+        InvokeRemoveUnsupportedWallIslands();
+
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(0f, 1f)), Is.True);
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(0f, -2f)), Is.False);
+        Assert.That(CountHiddenCleanupStamps(), Is.GreaterThanOrEqualTo(1));
+        Assert.That(GameObject.Find("Falling Wall Slab"), Is.Not.Null);
+    }
+
+    [Test]
+    public void InteriorBridgeRendersOnSeparateNonWallLayerObject()
+    {
+        ConfigureWall(new Vector3(6f, 4f, 0.5f));
+        InvokeTakeDamage(10f, new Vector3(0f, 0.5f, 0.25f), Vector3.back);
+
+        var bridge = FindChild("Destructible Wall Interior Bridge");
+        Assert.That(bridge, Is.Not.Null);
+        Assert.That(bridge.GetComponent<MeshFilter>().sharedMesh, Is.Not.Null);
+        var renderer = bridge.GetComponent<MeshRenderer>();
+        Assert.That(renderer, Is.Not.Null);
+        var wallLayer = (uint)System.Type.GetType("ArenaShooter.DroidRenderSetup, Assembly-CSharp")
+            .GetField("WallRenderingLayer", BindingFlags.Static | BindingFlags.Public)
+            .GetRawConstantValue();
+        Assert.That(renderer.renderingLayerMask & wallLayer, Is.EqualTo(0u));
     }
 
     [Test]

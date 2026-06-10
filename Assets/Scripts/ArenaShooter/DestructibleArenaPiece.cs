@@ -63,8 +63,11 @@ namespace ArenaShooter
         private const int CantileverMaxFailurePasses = 4;
         private const int MaxFallingSlabsPerDamage = 6;
         private const float FallingSlabMinimumArea = 0.02f;
-        private const float FallingSlabLifetimeSeconds = 1.35f;
+        private const float FallingSlabLifetimeSeconds = 2.4f;
         private const float FallingSlabMaxTipDegreesPerSecond = 55f;
+        private const float PedestalWidthAmplificationLimit = 3.5f;
+        private const float PedestalMinimumCrushMass = 0.25f;
+        private const int PedestalMaxFailurePasses = 3;
         private const float UnsupportedIslandCellSampleInset = 0.32f;
         private const float OpenContourShardSupportProbeScale = 1.6f;
         private const float OpenContourShardBoundaryWidthScale = 0.72f;
@@ -139,6 +142,8 @@ namespace ArenaShooter
         private MeshRenderer outlineSourceRenderer;
         private MeshFilter damageContourMeshFilter;
         private MeshRenderer damageContourRenderer;
+        private MeshFilter interiorBridgeMeshFilter;
+        private MeshRenderer interiorBridgeRenderer;
         private BoxCollider surfaceCollider;
         private Vector3Int chunkCounts;
         private bool initialized;
@@ -443,8 +448,17 @@ namespace ArenaShooter
             private float duration;
             private float elapsed;
             private Vector3 startScale;
+            private float groundY;
+            private float restHalfHeight;
+            private bool grounded;
 
-            public void Initialize(Vector3 initialVelocity, Vector3 tipAxisWorld, float tipSpeed, float lifetimeSeconds)
+            public void Initialize(
+                Vector3 initialVelocity,
+                Vector3 tipAxisWorld,
+                float tipSpeed,
+                float lifetimeSeconds,
+                float groundLevelY,
+                float groundedHalfHeight)
             {
                 velocity = initialVelocity;
                 tipAxis = tipAxisWorld.sqrMagnitude > 0.0001f ? tipAxisWorld.normalized : Vector3.right;
@@ -452,14 +466,39 @@ namespace ArenaShooter
                 duration = Mathf.Max(0.1f, lifetimeSeconds);
                 startScale = transform.localScale;
                 elapsed = 0f;
+                groundY = groundLevelY;
+                restHalfHeight = Mathf.Max(0.02f, groundedHalfHeight);
+                grounded = false;
             }
 
             private void Update()
             {
                 elapsed += Time.deltaTime;
-                velocity += Vector3.down * (Gravity * Time.deltaTime);
-                transform.position += velocity * Time.deltaTime;
-                transform.Rotate(tipAxis, tipDegreesPerSecond * Time.deltaTime, Space.World);
+                if (!grounded)
+                {
+                    velocity += Vector3.down * (Gravity * Time.deltaTime);
+                    transform.position += velocity * Time.deltaTime;
+                    transform.Rotate(tipAxis, tipDegreesPerSecond * Time.deltaTime, Space.World);
+                    if (transform.position.y - restHalfHeight <= groundY)
+                    {
+                        transform.position = new Vector3(
+                            transform.position.x,
+                            groundY + restHalfHeight,
+                            transform.position.z);
+                        if (velocity.y < -1.4f)
+                        {
+                            velocity = new Vector3(velocity.x * 0.55f, -velocity.y * 0.28f, velocity.z * 0.55f);
+                            tipDegreesPerSecond *= 0.45f;
+                        }
+                        else
+                        {
+                            velocity = Vector3.zero;
+                            tipDegreesPerSecond = 0f;
+                            grounded = true;
+                        }
+                    }
+                }
+
                 var t = Mathf.Clamp01(elapsed / duration);
                 var shrink = 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.7f, 1f, t));
                 transform.localScale = startScale * Mathf.Max(0.001f, shrink);
@@ -1515,6 +1554,7 @@ namespace ArenaShooter
             }
 
             RemoveCantileverCollapsedWallSections(hitNormalWorld);
+            RemovePedestalCrushedWallSections(hitNormalWorld);
         }
 
         private bool TryGetWallUvUpAxis(Vector3 u, Vector3 v, out bool upIsU, out float upSign)
@@ -1909,6 +1949,267 @@ namespace ArenaShooter
                     return;
                 }
             }
+        }
+
+        private void RemovePedestalCrushedWallSections(Vector3 hitNormalWorld)
+        {
+            if (!UsesContourOwnedWallDamage() ||
+                wallDamageStamps.Count == 0 ||
+                !TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out var bounds))
+            {
+                return;
+            }
+
+            if (!TryGetWallUvUpAxis(u, v, out var upIsU, out var upSign))
+            {
+                return;
+            }
+
+            var sprayDirectionWorld = hitNormalWorld.sqrMagnitude > 0.0001f
+                ? (-hitNormalWorld.normalized + Vector3.down).normalized
+                : (transform.TransformDirection(-normal) + Vector3.down).normalized;
+            var slabBudget = MaxFallingSlabsPerDamage;
+            var sprayBudget = MaxUnsupportedIslandSpraysPerDamage;
+            for (var pass = 0; pass < PedestalMaxFailurePasses; pass++)
+            {
+                var grid = BuildUnsupportedIslandScanGrid(bounds);
+                if (grid.Count == 0)
+                {
+                    return;
+                }
+
+                var crushedCells = FindPedestalCrushedCells(grid, upIsU, upSign);
+                if (crushedCells.Count == 0)
+                {
+                    return;
+                }
+
+                var fallingCells = GatherPedestalFallingCells(grid, upIsU, upSign, crushedCells);
+                if (fallingCells.Count == 0)
+                {
+                    return;
+                }
+
+                var fallingMask = new bool[grid.Count];
+                for (var i = 0; i < fallingCells.Count; i++)
+                {
+                    fallingMask[fallingCells[i]] = true;
+                }
+
+                var visited = new bool[grid.Count];
+                var componentMask = new bool[grid.Count];
+                var removedAnyComponent = false;
+                for (var i = 0; i < fallingCells.Count; i++)
+                {
+                    var seed = fallingCells[i];
+                    if (visited[seed])
+                    {
+                        continue;
+                    }
+
+                    var cells = new List<int>();
+                    var queue = new Queue<int>();
+                    visited[seed] = true;
+                    queue.Enqueue(seed);
+                    while (queue.Count > 0)
+                    {
+                        var current = queue.Dequeue();
+                        cells.Add(current);
+                        componentMask[current] = true;
+                        var x = grid.CellX(current);
+                        var y = grid.CellY(current);
+                        for (var offsetIndex = 0; offsetIndex < IslandScanNeighborOffsets.Length; offsetIndex++)
+                        {
+                            var neighborX = x + IslandScanNeighborOffsets[offsetIndex].x;
+                            var neighborY = y + IslandScanNeighborOffsets[offsetIndex].y;
+                            if (!grid.ContainsCell(neighborX, neighborY))
+                            {
+                                continue;
+                            }
+
+                            var neighbor = grid.Index(neighborX, neighborY);
+                            if (!fallingMask[neighbor] || visited[neighbor])
+                            {
+                                continue;
+                            }
+
+                            visited[neighbor] = true;
+                            queue.Enqueue(neighbor);
+                        }
+                    }
+
+                    if (TryCreateUnsupportedIslandFromCells(grid, cells, componentMask, out var island))
+                    {
+                        AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
+                        SpawnFallingWallSlab(island, normal, u, v, halfN, ref slabBudget);
+                        if (island.RequiresSpray && sprayBudget > 0)
+                        {
+                            SpawnUnsupportedWallIslandSpray(island, normal, u, v, halfN, sprayDirectionWorld, ref sprayBudget);
+                        }
+
+                        removedAnyComponent = true;
+                    }
+
+                    ClearCantileverComponentMask(componentMask, cells);
+                }
+
+                if (!removedAnyComponent)
+                {
+                    return;
+                }
+            }
+        }
+
+        private static List<int> FindPedestalCrushedCells(UnsupportedIslandScanGrid grid, bool upIsU, float upSign)
+        {
+            var crushed = new List<int>();
+            var horizontalCount = CantileverHorizontalCount(grid, upIsU);
+            var verticalCount = CantileverVerticalCount(grid, upIsU);
+            var cellArea = CantileverVerticalStep(grid, upIsU) * CantileverHorizontalStep(grid, upIsU);
+            if (verticalCount < 2)
+            {
+                return crushed;
+            }
+
+            var loads = new float[grid.Count];
+            var topW = upSign > 0f ? verticalCount - 1 : 0;
+            var bottomW = upSign > 0f ? 0 : verticalCount - 1;
+            var stepDir = upSign > 0f ? -1 : 1;
+            for (var w = topW; w != bottomW; w += stepDir)
+            {
+                var belowW = w + stepDir;
+                var h = 0;
+                while (h < horizontalCount)
+                {
+                    if (!grid.Solid[CantileverCellIndex(grid, upIsU, h, w)])
+                    {
+                        h++;
+                        continue;
+                    }
+
+                    var spanStart = h;
+                    var spanLoad = 0f;
+                    while (h < horizontalCount && grid.Solid[CantileverCellIndex(grid, upIsU, h, w)])
+                    {
+                        spanLoad += loads[CantileverCellIndex(grid, upIsU, h, w)] + 1f;
+                        h++;
+                    }
+
+                    var spanEnd = h - 1;
+                    var contactCount = 0;
+                    for (var contact = spanStart; contact <= spanEnd; contact++)
+                    {
+                        if (grid.Solid[CantileverCellIndex(grid, upIsU, contact, belowW)])
+                        {
+                            contactCount++;
+                        }
+                    }
+
+                    if (contactCount == 0)
+                    {
+                        continue;
+                    }
+
+                    var spanWidthCells = spanEnd - spanStart + 1;
+                    if (spanWidthCells > contactCount * PedestalWidthAmplificationLimit &&
+                        spanLoad * cellArea >= PedestalMinimumCrushMass)
+                    {
+                        for (var contact = spanStart; contact <= spanEnd; contact++)
+                        {
+                            var crushedIndex = CantileverCellIndex(grid, upIsU, contact, belowW);
+                            if (grid.Solid[crushedIndex])
+                            {
+                                crushed.Add(crushedIndex);
+                            }
+                        }
+                    }
+
+                    var loadPerContact = spanLoad / contactCount;
+                    for (var contact = spanStart; contact <= spanEnd; contact++)
+                    {
+                        var belowIndex = CantileverCellIndex(grid, upIsU, contact, belowW);
+                        if (grid.Solid[belowIndex])
+                        {
+                            loads[belowIndex] += loadPerContact;
+                        }
+                    }
+                }
+            }
+
+            return crushed;
+        }
+
+        private static List<int> GatherPedestalFallingCells(
+            UnsupportedIslandScanGrid grid,
+            bool upIsU,
+            float upSign,
+            List<int> crushedCells)
+        {
+            var reachableOriginal = ComputeFloorReachableCells(grid, upIsU, upSign, null);
+            var crushedMask = new bool[grid.Count];
+            for (var i = 0; i < crushedCells.Count; i++)
+            {
+                crushedMask[crushedCells[i]] = true;
+            }
+
+            var reachableBroken = ComputeFloorReachableCells(grid, upIsU, upSign, crushedMask);
+            var falling = new List<int>();
+            for (var index = 0; index < grid.Count; index++)
+            {
+                if (grid.Solid[index] && reachableOriginal[index] && !reachableBroken[index])
+                {
+                    falling.Add(index);
+                }
+            }
+
+            return falling;
+        }
+
+        private static bool[] ComputeFloorReachableCells(UnsupportedIslandScanGrid grid, bool upIsU, float upSign, bool[] blockedMask)
+        {
+            var reachable = new bool[grid.Count];
+            var queue = new Queue<int>();
+            var horizontalCount = CantileverHorizontalCount(grid, upIsU);
+            var verticalCount = CantileverVerticalCount(grid, upIsU);
+            var bottomW = upSign > 0f ? 0 : verticalCount - 1;
+            for (var h = 0; h < horizontalCount; h++)
+            {
+                var index = CantileverCellIndex(grid, upIsU, h, bottomW);
+                if (grid.Solid[index] && (blockedMask == null || !blockedMask[index]) && !reachable[index])
+                {
+                    reachable[index] = true;
+                    queue.Enqueue(index);
+                }
+            }
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                var x = grid.CellX(current);
+                var y = grid.CellY(current);
+                for (var i = 0; i < IslandScanNeighborOffsets.Length; i++)
+                {
+                    var neighborX = x + IslandScanNeighborOffsets[i].x;
+                    var neighborY = y + IslandScanNeighborOffsets[i].y;
+                    if (!grid.ContainsCell(neighborX, neighborY))
+                    {
+                        continue;
+                    }
+
+                    var neighbor = grid.Index(neighborX, neighborY);
+                    if (!grid.Solid[neighbor] ||
+                        reachable[neighbor] ||
+                        (blockedMask != null && blockedMask[neighbor]))
+                    {
+                        continue;
+                    }
+
+                    reachable[neighbor] = true;
+                    queue.Enqueue(neighbor);
+                }
+            }
+
+            return reachable;
         }
 
         private List<UnsupportedWallIsland> FindUnsupportedContourOwnedWallIslands(DamageComponentPlaneBounds bounds)
@@ -3497,7 +3798,9 @@ namespace ArenaShooter
             var mesh = CreateMesh("Falling Wall Slab Mesh", vertices, new[] { triangles });
             var seed = CalculateUnsupportedIslandSpraySeed(island, transform.TransformDirection(normal));
             var centerLocal = u * centroid.x + v * centroid.y;
-            SpawnFallingDebrisObject(mesh, transform.TransformPoint(centerLocal), transform.rotation, seed);
+            var drift = transform.TransformDirection(normal) *
+                ((Hash01(seed ^ 0x9c7) > 0.5f ? 1f : -1f) * 0.55f);
+            SpawnFallingDebrisObject(mesh, transform.TransformPoint(centerLocal), transform.rotation, seed, drift);
             slabBudget--;
         }
 
@@ -3506,7 +3809,7 @@ namespace ArenaShooter
             return u * (point.x - centroid.x) + v * (point.y - centroid.y) + normal * depth;
         }
 
-        private void SpawnFallingDebrisObject(Mesh mesh, Vector3 worldPosition, Quaternion worldRotation, int seed)
+        private void SpawnFallingDebrisObject(Mesh mesh, Vector3 worldPosition, Quaternion worldRotation, int seed, Vector3 driftVelocityWorld)
         {
             var slab = new GameObject("Falling Wall Slab");
             slab.transform.position = worldPosition;
@@ -3520,6 +3823,13 @@ namespace ArenaShooter
                 : configuredOutlineCategory;
             DroidRenderSetup.ApplyRenderer(renderer, outlineCategory);
 
+            var groundY = worldPosition.y - 80f;
+            if (Physics.Raycast(worldPosition, Vector3.down, out var groundHit, 120f, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+            {
+                groundY = groundHit.point.y;
+            }
+
+            var restHalfHeight = Mathf.Max(0.02f, mesh.bounds.extents.y * 0.7f);
             var lateral = new Vector3(
                 Mathf.Lerp(-0.35f, 0.35f, Hash01(seed ^ 0x3d1)),
                 0f,
@@ -3527,7 +3837,13 @@ namespace ArenaShooter
             var tipAxis = Vector3.Cross(Vector3.up, lateral.sqrMagnitude > 0.0001f ? lateral.normalized : Vector3.forward);
             var tipSpeed = Mathf.Lerp(18f, FallingSlabMaxTipDegreesPerSecond, Hash01(seed ^ 0x215)) *
                 (Hash01(seed ^ 0x6c2) > 0.5f ? 1f : -1f);
-            slab.AddComponent<FallingWallSlabAnimation>().Initialize(lateral, tipAxis, tipSpeed, FallingSlabLifetimeSeconds);
+            slab.AddComponent<FallingWallSlabAnimation>().Initialize(
+                lateral + driftVelocityWorld,
+                tipAxis,
+                tipSpeed,
+                FallingSlabLifetimeSeconds,
+                groundY,
+                restHalfHeight);
         }
 
         private int CalculateUnsupportedIslandSpraySeed(UnsupportedWallIsland island, Vector3 sprayDirectionWorld)
@@ -3841,30 +4157,50 @@ namespace ArenaShooter
         {
             var vertices = new List<Vector3>();
             var slabTriangles = new List<int>();
-            var bridgeTriangles = new List<int>();
             AddContourOwnedWallBodyGeometry(vertices, slabTriangles, 0f);
 
             var thickness = GetContourOwnedWallContourThickness();
             var visibleSegments = GetVisibleContourOwnedWallSegments(thickness);
             var bridgeSegments = GetContourOwnedWallBridgeSegments(thickness);
+            var bridgeVertices = new List<Vector3>();
+            var bridgeTriangles = new List<int>();
             if (bridgeSegments.Count > 0)
             {
-                AddContourInteriorBridge(vertices, bridgeTriangles, bridgeSegments);
+                AddContourInteriorBridge(bridgeVertices, bridgeTriangles, bridgeSegments);
             }
 
-            combinedMeshFilter.sharedMesh = CreateMesh("Combined Destructible Wall Mesh", vertices, new[] { slabTriangles, bridgeTriangles });
+            combinedMeshFilter.sharedMesh = CreateMesh("Combined Destructible Wall Mesh", vertices, new[] { slabTriangles });
             if (combinedRenderer != null)
             {
                 combinedRenderer.sharedMaterials = new[]
                 {
-                    GetContourClippedWallBodyMaterial(),
-                    GetUnclippedDestructibleBodyMaterial()
+                    GetContourClippedWallBodyMaterial()
                 };
             }
+
+            EnsureInteriorBridgeObject();
+            interiorBridgeMeshFilter.sharedMesh = bridgeVertices.Count == 0
+                ? null
+                : CreateMesh("Destructible Wall Interior Bridge Mesh", bridgeVertices, new[] { bridgeTriangles });
 
             RebuildOutlineSourceMesh();
             RebuildContourOwnedWallDamageContourMesh(visibleSegments);
             UploadWallDamageShaderData();
+        }
+
+        private void EnsureInteriorBridgeObject()
+        {
+            if (interiorBridgeMeshFilter != null && interiorBridgeRenderer != null)
+            {
+                return;
+            }
+
+            var bridge = new GameObject("Destructible Wall Interior Bridge");
+            bridge.transform.SetParent(transform, false);
+            interiorBridgeMeshFilter = bridge.AddComponent<MeshFilter>();
+            interiorBridgeRenderer = bridge.AddComponent<MeshRenderer>();
+            interiorBridgeRenderer.sharedMaterial = GetUnclippedDestructibleBodyMaterial();
+            DroidRenderSetup.ApplyRenderer(interiorBridgeRenderer, StylizedOutlineCategory.None);
         }
 
         private void RebuildContourOwnedWallDamageContourMesh(List<ContourSegment2D> visibleSegments)
@@ -4923,7 +5259,7 @@ namespace ArenaShooter
 
             var mesh = CreateMesh("Falling Pillar Segment Mesh", vertices, new[] { triangles });
             var centerLocal = new Vector3(chunk.LocalPosition.x, (minY + maxY) * 0.5f, chunk.LocalPosition.z);
-            SpawnFallingDebrisObject(mesh, transform.TransformPoint(centerLocal), transform.rotation, CalculatePillarBiteSeed(chunk, 0));
+            SpawnFallingDebrisObject(mesh, transform.TransformPoint(centerLocal), transform.rotation, CalculatePillarBiteSeed(chunk, 0), Vector3.zero);
         }
 
         private List<Vector2> BuildBittenPillarCrossSection(Chunk chunk, float inflate, List<bool> edgeIsCut)
