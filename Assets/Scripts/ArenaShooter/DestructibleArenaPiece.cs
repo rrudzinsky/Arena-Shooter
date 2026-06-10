@@ -1585,6 +1585,9 @@ namespace ArenaShooter
             var halfV = Mathf.Min(
                 Mathf.Max(0.12f, bounds.Height / Mathf.Max(1, CalculateCellCount(bounds.Height)) * 0.5f),
                 bounds.Height * 0.21f);
+            var stampRadius = Mathf.Min(halfU, halfV);
+            halfU = stampRadius;
+            halfV = stampRadius;
             var stamp = CreateContourOwnedWallDamageStamp(
                 center,
                 normal,
@@ -4081,7 +4084,12 @@ namespace ArenaShooter
             slabCollider.convex = true;
             slabCollider.material = GetFallingDebrisPhysicsMaterial();
             var body = slab.AddComponent<Rigidbody>();
-            body.mass = 2f;
+            var debrisSize = mesh.bounds.size;
+            var debrisFaceArea = Mathf.Max(
+                debrisSize.x * debrisSize.y,
+                Mathf.Max(debrisSize.y * debrisSize.z, debrisSize.x * debrisSize.z));
+            var kickScale = Mathf.Clamp(0.4f / Mathf.Max(0.1f, debrisFaceArea), 0.2f, 1.5f);
+            body.mass = Mathf.Clamp(debrisFaceArea * 4f, 1f, 40f);
             body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             var lateral = new Vector3(
                 Mathf.Lerp(-0.35f, 0.35f, Hash01(seed ^ 0x3d1)),
@@ -4090,8 +4098,8 @@ namespace ArenaShooter
             var tipAxis = Vector3.Cross(Vector3.up, lateral.sqrMagnitude > 0.0001f ? lateral.normalized : Vector3.forward);
             var tipSpeed = Mathf.Lerp(18f, FallingSlabMaxTipDegreesPerSecond, Hash01(seed ^ 0x215)) *
                 (Hash01(seed ^ 0x6c2) > 0.5f ? 1f : -1f);
-            body.linearVelocity = lateral + driftVelocityWorld;
-            body.angularVelocity = tipAxis * (tipSpeed * Mathf.Deg2Rad);
+            body.linearVelocity = (lateral + driftVelocityWorld) * kickScale;
+            body.angularVelocity = tipAxis * (tipSpeed * Mathf.Deg2Rad * kickScale);
             slab.AddComponent<FallingWallSlabAnimation>().Initialize(FallingSlabLifetimeSeconds);
         }
 
