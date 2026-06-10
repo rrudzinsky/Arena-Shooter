@@ -52,6 +52,17 @@ public sealed class DestructibleArenaPieceIslandTests
     }
 
     [Test]
+    public void UnsupportedIslandSpawnsFallingSlab()
+    {
+        SetConfiguredSize(new Vector3(10f, 6f, 0.5f));
+        AddDamageRing(Vector2.zero);
+
+        InvokeRemoveUnsupportedWallIslands();
+
+        Assert.That(GameObject.Find("Falling Wall Slab"), Is.Not.Null);
+    }
+
+    [Test]
     public void MultipleDamageRingsAreAllDetectedInOneScan()
     {
         AddDamageRing(new Vector2(-2.8f, 0f));
@@ -1057,7 +1068,7 @@ public sealed class DestructibleArenaPieceIslandTests
         var objects = new List<GameObject>();
         foreach (var spray in Object.FindObjectsByType<GameObject>(FindObjectsSortMode.None))
         {
-            if (spray != null && (spray.name == "Wall Material Spray Burst" || spray.name == "Wall Material Spray Chip"))
+            if (spray != null && (spray.name == "Wall Material Spray Burst" || spray.name == "Wall Material Spray Chip" || spray.name == "Falling Wall Slab"))
             {
                 objects.Add(spray);
             }

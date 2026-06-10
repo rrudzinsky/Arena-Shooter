@@ -1474,6 +1474,7 @@ namespace ArenaShooter
                 ? -hitNormalWorld.normalized
                 : transform.TransformDirection(-normal);
             var sprayBudget = MaxUnsupportedIslandSpraysPerDamage;
+            var slabBudget = MaxFallingSlabsPerDamage;
             for (var pass = 0; pass < UnsupportedIslandCleanupPasses; pass++)
             {
                 var islands = FindUnsupportedContourOwnedWallIslands(bounds);
@@ -1489,6 +1490,7 @@ namespace ArenaShooter
                     if (!island.RequiresSpray)
                     {
                         AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
+                        SpawnFallingWallSlab(island, normal, u, v, halfN, ref slabBudget);
                         removedAnyIsland = true;
                         continue;
                     }
@@ -1501,6 +1503,7 @@ namespace ArenaShooter
                     if (SpawnUnsupportedWallIslandSpray(island, normal, u, v, halfN, sprayDirectionWorld, ref sprayBudget))
                     {
                         AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
+                        SpawnFallingWallSlab(island, normal, u, v, halfN, ref slabBudget);
                         removedAnyIsland = true;
                     }
                 }
@@ -2645,6 +2648,31 @@ namespace ArenaShooter
             return false;
         }
 
+        private static void SimplifyPolygonLoop(List<Vector2> points, float tolerance)
+        {
+            if (points == null || tolerance <= 0f)
+            {
+                return;
+            }
+
+            var toleranceSquared = tolerance * tolerance;
+            var removedAny = true;
+            while (removedAny && points.Count > 4)
+            {
+                removedAny = false;
+                for (var i = points.Count - 1; i >= 0 && points.Count > 4; i--)
+                {
+                    var previous = points[(i + points.Count - 1) % points.Count];
+                    var next = points[(i + 1) % points.Count];
+                    if (DistancePointToSegmentSquared(points[i], previous, next) <= toleranceSquared)
+                    {
+                        points.RemoveAt(i);
+                        removedAny = true;
+                    }
+                }
+            }
+        }
+
         private static float DistancePointToSegmentSquared(Vector2 point, Vector2 start, Vector2 end)
         {
             var delta = end - start;
@@ -2883,6 +2911,7 @@ namespace ArenaShooter
             }
 
             SanitizePolygonLoop(points);
+            SimplifyPolygonLoop(points, Mathf.Max(grid.StepU, grid.StepV) * 0.75f);
             if (points.Count < 3)
             {
                 return false;
@@ -3958,30 +3987,105 @@ namespace ArenaShooter
                 return;
             }
 
-            var outlineBounds = SinkContourOwnedWallOutlineFloorEdge(bounds, u, v);
             var outlineHalfN = halfN + WallOutlineProxyDepthOffset;
-            AddContourOwnedWallPlaneQuad(
-                vertices,
-                triangles,
-                normal,
-                u,
-                v,
-                outlineHalfN,
-                outlineBounds.MinU,
-                outlineBounds.MaxU,
-                outlineBounds.MinV,
-                outlineBounds.MaxV);
-            AddContourOwnedWallPlaneQuad(
-                vertices,
-                triangles,
-                -normal,
-                u,
-                v,
-                outlineHalfN,
-                outlineBounds.MinU,
-                outlineBounds.MaxU,
-                outlineBounds.MinV,
-                outlineBounds.MaxV);
+            if (wallDamageStamps.Count == 0)
+            {
+                var outlineBounds = SinkContourOwnedWallOutlineFloorEdge(bounds, u, v);
+                AddContourOwnedWallPlaneQuad(
+                    vertices,
+                    triangles,
+                    normal,
+                    u,
+                    v,
+                    outlineHalfN,
+                    outlineBounds.MinU,
+                    outlineBounds.MaxU,
+                    outlineBounds.MinV,
+                    outlineBounds.MaxV);
+                AddContourOwnedWallPlaneQuad(
+                    vertices,
+                    triangles,
+                    -normal,
+                    u,
+                    v,
+                    outlineHalfN,
+                    outlineBounds.MinU,
+                    outlineBounds.MaxU,
+                    outlineBounds.MinV,
+                    outlineBounds.MaxV);
+                return;
+            }
+
+            AddSurvivingContourOwnedWallOutlineQuads(vertices, triangles, normal, u, v, outlineHalfN, bounds);
+        }
+
+        private void AddSurvivingContourOwnedWallOutlineQuads(
+            List<Vector3> vertices,
+            List<int> triangles,
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float outlineHalfN,
+            DamageComponentPlaneBounds bounds)
+        {
+            var grid = BuildUnsupportedIslandScanGrid(bounds);
+            if (grid.Count == 0)
+            {
+                return;
+            }
+
+            var uUp = Vector3.Dot(u, Vector3.up);
+            var vUp = Vector3.Dot(v, Vector3.up);
+            var uVertical = Mathf.Abs(uUp) > 0.5f;
+            var vVertical = Mathf.Abs(vUp) > 0.5f;
+            var sink = CalculateWallOutlineFloorSeamSink(uVertical ? bounds.Width : bounds.Height);
+            for (var x = 0; x < grid.Columns; x++)
+            {
+                var columnMinU = bounds.MinU + x * grid.StepU;
+                var columnMaxU = bounds.MinU + (x + 1) * grid.StepU;
+                var runStart = -1;
+                for (var y = 0; y <= grid.Rows; y++)
+                {
+                    var solid = y < grid.Rows && grid.Solid[grid.Index(x, y)];
+                    if (solid && runStart < 0)
+                    {
+                        runStart = y;
+                    }
+                    else if (!solid && runStart >= 0)
+                    {
+                        var quadMinU = columnMinU;
+                        var quadMaxU = columnMaxU;
+                        var quadMinV = bounds.MinV + runStart * grid.StepV;
+                        var quadMaxV = bounds.MinV + y * grid.StepV;
+                        if (vVertical)
+                        {
+                            if (vUp > 0f && runStart == 0)
+                            {
+                                quadMinV -= sink;
+                            }
+                            else if (vUp < 0f && y == grid.Rows)
+                            {
+                                quadMaxV += sink;
+                            }
+                        }
+                        else if (uVertical)
+                        {
+                            if (uUp > 0f && x == 0)
+                            {
+                                quadMinU -= sink;
+                            }
+                            else if (uUp < 0f && x == grid.Columns - 1)
+                            {
+                                quadMaxU += sink;
+                            }
+                        }
+
+                        AddContourOwnedWallPlaneQuad(vertices, triangles, normal, u, v, outlineHalfN, quadMinU, quadMaxU, quadMinV, quadMaxV);
+                        AddContourOwnedWallPlaneQuad(vertices, triangles, -normal, u, v, outlineHalfN, quadMinU, quadMaxU, quadMinV, quadMaxV);
+                        runStart = -1;
+                    }
+                }
+            }
         }
 
         private void AddContourOwnedWallBodyGeometry(

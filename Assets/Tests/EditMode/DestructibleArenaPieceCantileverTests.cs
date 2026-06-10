@@ -10,6 +10,8 @@ public sealed class DestructibleArenaPieceCantileverTests
 
     private static readonly System.Type PieceType = System.Type.GetType("ArenaShooter.DestructibleArenaPiece, Assembly-CSharp");
     private static readonly System.Type DamageStampType = PieceType.GetNestedType("DamageStamp", BindingFlags.NonPublic);
+    private static readonly System.Type ProfileType = System.Type.GetType("ArenaShooter.DestructibleDamageProfile, Assembly-CSharp");
+    private static readonly System.Type OutlineCategoryType = System.Type.GetType("ArenaShooter.StylizedOutlineCategory, Assembly-CSharp");
 
     private GameObject testObject;
     private Component piece;
@@ -106,6 +108,21 @@ public sealed class DestructibleArenaPieceCantileverTests
 
         Assert.That(GetBridgeSegmentCount(), Is.GreaterThan(0));
         Assert.That(GetVisibleSegmentCount(), Is.Zero);
+    }
+
+    [Test]
+    public void WallOutlineSourceMeshReflectsSurvivingMaterialAfterDamage()
+    {
+        ConfigureWall(new Vector3(6f, 4f, 0.5f));
+        var source = FindChild("Destructible Wall Outline Source");
+        Assert.That(source, Is.Not.Null);
+        var intactVertexCount = source.GetComponent<MeshFilter>().sharedMesh.vertexCount;
+
+        InvokeTakeDamage(10f, new Vector3(0f, 0.5f, 0.25f), Vector3.back);
+
+        var damagedMesh = source.GetComponent<MeshFilter>().sharedMesh;
+        Assert.That(damagedMesh, Is.Not.Null);
+        Assert.That(damagedMesh.vertexCount, Is.GreaterThan(intactVertexCount));
     }
 
     [Test]
@@ -212,6 +229,49 @@ public sealed class DestructibleArenaPieceCantileverTests
         SetStampField(stamp, "RenderClosed", false);
         SetStampField(stamp, "RenderContour", true);
         GetStampList().Add(stamp);
+    }
+
+    private void ConfigureWall(Vector3 size)
+    {
+        var configure = PieceType.GetMethod(
+            "Configure",
+            BindingFlags.Instance | BindingFlags.Public,
+            null,
+            new[] { typeof(float), typeof(Vector3), typeof(Material), OutlineCategoryType, ProfileType, typeof(Vector3) },
+            null);
+        Assert.That(configure, Is.Not.Null);
+        configure.Invoke(piece, new object[]
+        {
+            300f,
+            size,
+            null,
+            System.Enum.Parse(OutlineCategoryType, "Wall"),
+            System.Enum.Parse(ProfileType, "Wall"),
+            Vector3.zero
+        });
+    }
+
+    private void InvokeTakeDamage(float amount, Vector3 hitPoint, Vector3 hitNormal)
+    {
+        PieceType.GetMethod(
+            "TakeDamage",
+            BindingFlags.Instance | BindingFlags.Public,
+            null,
+            new[] { typeof(float), typeof(Vector3), typeof(Vector3) },
+            null).Invoke(piece, new object[] { amount, hitPoint, hitNormal });
+    }
+
+    private GameObject FindChild(string name)
+    {
+        foreach (var transform in testObject.GetComponentsInChildren<Transform>(true))
+        {
+            if (transform.gameObject.name == name)
+            {
+                return transform.gameObject;
+            }
+        }
+
+        return null;
     }
 
     private int GetBridgeSegmentCount()
