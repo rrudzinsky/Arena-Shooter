@@ -2,6 +2,7 @@ using UnityEngine;
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
+using System;
 
 namespace ArenaShooter
 {
@@ -13,6 +14,9 @@ namespace ArenaShooter
         private const string ViewAssetPath = "Assets/Models/CyberPulsePistolView.fbx";
         private const string ViewResourceAssetPath = "Assets/Resources/Models/CyberPulsePistolView.fbx";
         private const string ViewResourcePath = "Models/CyberPulsePistolView";
+        private const string GlowLensNameToken = "glow lens";
+        private const string SightNameToken = "sight";
+        private const string FrontSightBlockNameToken = "front squared compensator";
 
         public static bool TryBuildViewModel(Transform parent, ArenaTheme theme, out Transform muzzle)
         {
@@ -65,8 +69,14 @@ namespace ArenaShooter
                 instance.transform,
                 viewModel ? 0.58f : 0.9f,
                 viewModel ? "Pulse pistol view model" : "Pulse pistol pickup model");
+            DroidRenderSetup.Apply(wrapper, viewModel ? StylizedOutlineCategory.FirstPersonPistol : StylizedOutlineCategory.Gun);
+            ApplyPistolOutlineOverrides(wrapper, viewModel);
             ApplyThemeMaterials(wrapper, theme);
-            DroidRenderSetup.Apply(wrapper, StylizedOutlineCategory.Gun);
+            if (viewModel)
+            {
+                ApplyFirstPersonWeaponOccluder(wrapper);
+            }
+
             ImportedModelUtility.LogModelInstanceDiagnostics(viewModel ? "Pulse pistol view model" : "Pulse pistol pickup model", wrapper);
             return wrapper;
         }
@@ -79,7 +89,7 @@ namespace ArenaShooter
                 return null;
             }
 
-            var instance = Object.Instantiate(prefab, parent, false);
+            var instance = UnityEngine.Object.Instantiate(prefab, parent, false);
             instance.name = name;
             ImportedModelUtility.RemoveImportedCamerasAndLights(instance);
             ImportedModelUtility.RemoveColliders(instance);
@@ -115,9 +125,10 @@ namespace ArenaShooter
             foreach (var renderer in instance.GetComponentsInChildren<Renderer>(true))
             {
                 var materials = renderer.sharedMaterials;
+                var material = ResolveThemeMaterial(theme);
                 for (var i = 0; i < materials.Length; i++)
                 {
-                    materials[i] = ResolveThemeMaterial(theme);
+                    materials[i] = material;
                 }
 
                 renderer.sharedMaterials = materials;
@@ -127,6 +138,116 @@ namespace ArenaShooter
         private static Material ResolveThemeMaterial(ArenaTheme theme)
         {
             return theme.Pickup;
+        }
+
+        private static void ApplyPistolOutlineOverrides(GameObject instance, bool viewModel)
+        {
+            foreach (var renderer in instance.GetComponentsInChildren<Renderer>(true))
+            {
+                var category = ResolvePistolOutlineOverride(renderer, instance.transform, viewModel);
+                if (category.HasValue)
+                {
+                    DroidRenderSetup.ApplyRenderer(renderer, category.Value);
+                }
+            }
+        }
+
+        private static StylizedOutlineCategory? ResolvePistolOutlineOverride(Renderer renderer, Transform root, bool viewModel)
+        {
+            if (IsGlowLensRenderer(renderer, root))
+            {
+                return StylizedOutlineCategory.None;
+            }
+
+            if (viewModel && IsIronSightRenderer(renderer, root))
+            {
+                return StylizedOutlineCategory.FirstPersonPistolSight;
+            }
+
+            return null;
+        }
+
+        private static bool IsGlowLensRenderer(Renderer renderer, Transform root)
+        {
+            return RendererMetadataContains(renderer, root, GlowLensNameToken);
+        }
+
+        private static bool IsIronSightRenderer(Renderer renderer, Transform root)
+        {
+            return RendererMetadataContains(renderer, root, SightNameToken) ||
+                RendererMetadataContains(renderer, root, FrontSightBlockNameToken);
+        }
+
+        private static bool RendererMetadataContains(Renderer renderer, Transform root, string token)
+        {
+            if (renderer == null)
+            {
+                return false;
+            }
+
+            if (TransformHierarchyContains(renderer.transform, root, token) ||
+                RendererMeshNameContains(renderer, token))
+            {
+                return true;
+            }
+
+            foreach (var material in renderer.sharedMaterials)
+            {
+                if (NameContains(material != null ? material.name : null, token))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TransformHierarchyContains(Transform transform, Transform root, string token)
+        {
+            var current = transform;
+            while (current != null)
+            {
+                if (NameContains(current.name, token))
+                {
+                    return true;
+                }
+
+                if (current == root)
+                {
+                    break;
+                }
+
+                current = current.parent;
+            }
+
+            return false;
+        }
+
+        private static bool RendererMeshNameContains(Renderer renderer, string token)
+        {
+            if (renderer is SkinnedMeshRenderer skinnedRenderer &&
+                NameContains(skinnedRenderer.sharedMesh != null ? skinnedRenderer.sharedMesh.name : null, token))
+            {
+                return true;
+            }
+
+            var meshFilter = renderer.GetComponent<MeshFilter>();
+            return meshFilter != null &&
+                NameContains(meshFilter.sharedMesh != null ? meshFilter.sharedMesh.name : null, token);
+        }
+
+        private static bool NameContains(string name, string token)
+        {
+            return !string.IsNullOrEmpty(name) &&
+                name.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static void ApplyFirstPersonWeaponOccluder(GameObject instance)
+        {
+            foreach (var renderer in instance.GetComponentsInChildren<Renderer>(true))
+            {
+                DroidRenderSetup.AddFirstPersonWeaponOccluder(renderer);
+            }
         }
 
         private static Transform FindDeepChild(Transform parent, string name)

@@ -14,7 +14,8 @@ public static class DroidOutlineRendererInstaller
         "Droid",
         "Medical",
         "Ammo",
-        "Gun"
+        "Gun",
+        "FirstPersonWeaponOccluder"
     };
 
     private static readonly string[] RendererAssetPaths =
@@ -65,6 +66,7 @@ public static class DroidOutlineRendererInstaller
             feature.settings.intensity = DroidRenderSetup.DefaultOutlineIntensity;
             feature.settings.normalEdgeThreshold = 0.16f;
             feature.settings.useReferenceNeonStyle = true;
+            feature.settings.suppressWorldOutlinesBehindFirstPersonWeapon = true;
             feature.settings.diagnosticMode = DroidOutlineRendererFeature.OutlineDiagnosticMode.Off;
             feature.settings.diagnosticBandIndex = -1;
             feature.settings.diagnosticIgnoreRenderingLayerFilter = false;

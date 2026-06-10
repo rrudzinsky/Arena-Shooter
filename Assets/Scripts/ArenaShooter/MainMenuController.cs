@@ -35,8 +35,14 @@ namespace ArenaShooter
         private const float TitleIntroMaximumDeltaTime = 1f / 30f;
         private const float ReferenceCanvasWidth = 1920f;
         private const float ReferenceCanvasHeight = 1080f;
+        private const string AllOutWarMapStyleOptionKey = "all_out_war_map_style";
 
         private readonly List<MenuButtonVisual> menuButtons = new();
+        private static readonly string[] AllOutWarMapStyleOptions =
+        {
+            AllOutWarMapStyleNames.RandomlyGenerate,
+            AllOutWarMapStyleNames.Hilly
+        };
 
         private Text titleText;
         private RectTransform titleRect;
@@ -63,11 +69,13 @@ namespace ArenaShooter
         private int lastThemeMusicIndex = -1;
         private int lastMenuActivationFrame = -1;
         private int selectedMenuIndex = -1;
+        private int mapStyleIndex;
         private bool gamepadNavigationHeld;
         private bool pointerPressHeld;
         private bool refreshingAllOutWarSliders;
         private bool menuBuilt;
         private bool allOutWarSetupOpen;
+        private bool loadingGame;
         private Coroutine themeMusicFadeCoroutine;
         private static Sprite synthwaveRingSprite;
         private static Sprite synthwaveGridBackdropSprite;
@@ -435,7 +443,8 @@ namespace ArenaShooter
             CreateSliderRow(setupRoot.transform, "Number of opponent armies", 0.88f, 1f, 7f, 3f, true, out opponentArmiesSlider, out opponentArmiesValueText);
             CreateSliderRow(setupRoot.transform, "Soldiers per army", 0.69f, 25f, 250f, 100f, false, out soldiersPerArmySlider, out soldiersPerArmyValueText);
             CreateSliderRow(setupRoot.transform, "Soldiers on battlefield at one time", 0.50f, 10f, 399f, 80f, false, out battlefieldCapSlider, out battlefieldCapValueText);
-            CreateOptionRow(setupRoot.transform, "Map style", "Randomly Generate", 0.31f, out mapStyleValueText);
+            mapStyleIndex = GetAllOutWarMapStyleOptionIndex(PlayerPrefs.GetString("AllOutWarMapStyle", AllOutWarMapStyleNames.RandomlyGenerate));
+            CreateOptionRow(setupRoot.transform, "Map style", AllOutWarMapStyleOptions, mapStyleIndex, AllOutWarMapStyleOptionKey, 0.31f, out mapStyleValueText);
 
             allOutWarTotalText = CreateText("", setupRoot.transform, 20, FontStyle.Bold, new Color(0.35f, 0.82f, 1f, 0.94f));
             allOutWarTotalText.alignment = TextAnchor.MiddleCenter;
@@ -557,6 +566,7 @@ namespace ArenaShooter
             battlefieldCapValueText = null;
             mapStyleValueText = null;
             allOutWarTotalText = null;
+            mapStyleIndex = 0;
         }
 
         private void ClearMenuContent()
@@ -711,6 +721,10 @@ namespace ArenaShooter
             {
                 AdjustMenuSlider(selectedItem.Slider, adjustment);
             }
+            else if (selectedItem != null && selectedItem.HasOptions)
+            {
+                AdjustMenuOption(selectedItem, adjustment);
+            }
 
             if (WasMenuBackPressed() && allOutWarSetupOpen)
             {
@@ -718,9 +732,16 @@ namespace ArenaShooter
                 return;
             }
 
-            if (WasMenuSubmitPressed() && selectedItem?.Command != MenuCommand.None)
+            if (WasMenuSubmitPressed() && selectedItem != null)
             {
-                ActivateMenuItem(selectedItem);
+                if (selectedItem.HasOptions)
+                {
+                    CycleMenuOption(selectedItem, 1);
+                }
+                else if (selectedItem.Command != MenuCommand.None)
+                {
+                    ActivateMenuItem(selectedItem);
+                }
             }
         }
 
@@ -824,6 +845,52 @@ namespace ArenaShooter
             }
 
             slider.value += adjustment.Value * GetSliderAdjustmentUnitsPerSecond(slider) * Time.unscaledDeltaTime;
+        }
+
+        private void AdjustMenuOption(MenuButtonVisual item, MenuSliderAdjustment adjustment)
+        {
+            if (item == null || !item.HasOptions)
+            {
+                return;
+            }
+
+            if (discreteSliderCooldown > 0f)
+            {
+                return;
+            }
+
+            CycleMenuOption(item, adjustment.Value > 0f ? 1 : -1);
+            discreteSliderCooldown = DiscreteSliderRepeatDelay;
+        }
+
+        private void CycleMenuOption(MenuButtonVisual item, int direction)
+        {
+            if (item == null || !item.HasOptions || direction == 0)
+            {
+                return;
+            }
+
+            SetMenuOptionIndex(item, item.OptionIndex + direction);
+        }
+
+        private void SetMenuOptionIndex(MenuButtonVisual item, int index)
+        {
+            if (item == null || !item.HasOptions)
+            {
+                return;
+            }
+
+            var count = item.OptionValues.Length;
+            item.OptionIndex = (index % count + count) % count;
+            if (item.ValueLabel != null)
+            {
+                item.ValueLabel.text = item.OptionValues[item.OptionIndex].ToUpperInvariant();
+            }
+
+            if (item.OptionKey == AllOutWarMapStyleOptionKey)
+            {
+                mapStyleIndex = item.OptionIndex;
+            }
         }
 
         private float GetSliderAdjustmentUnitsPerSecond(Slider slider)
@@ -997,6 +1064,12 @@ namespace ArenaShooter
                     return true;
                 }
 
+                if (item.HasOptions)
+                {
+                    CycleMenuOption(item, 1);
+                    return true;
+                }
+
                 ActivateMenuItem(item);
                 return true;
             }
@@ -1006,7 +1079,7 @@ namespace ArenaShooter
 
         private void ActivateMenuItem(MenuButtonVisual item)
         {
-            if (item == null || item.Command == MenuCommand.None)
+            if (loadingGame || item == null || item.Command == MenuCommand.None)
             {
                 return;
             }
@@ -1244,9 +1317,64 @@ namespace ArenaShooter
             PlayerPrefs.SetInt("AllOutWarOpponentArmies", Mathf.RoundToInt(opponentArmiesSlider != null ? opponentArmiesSlider.value : 3f));
             PlayerPrefs.SetInt("AllOutWarSoldiersPerArmy", Mathf.RoundToInt(soldiersPerArmySlider != null ? soldiersPerArmySlider.value : 100f));
             PlayerPrefs.SetInt("AllOutWarBattlefieldCap", Mathf.RoundToInt(battlefieldCapSlider != null ? battlefieldCapSlider.value : 80f));
-            PlayerPrefs.SetString("AllOutWarMapStyle", "Randomly Generate");
+            PlayerPrefs.SetString("AllOutWarMapStyle", GetSelectedAllOutWarMapStyle());
             PlayerPrefs.Save();
+            ShowAllOutWarLoadingState();
+            StartCoroutine(LoadSceneAfterLoadingFrame());
+        }
+
+        private IEnumerator LoadSceneAfterLoadingFrame()
+        {
+            yield return null;
             SceneManager.LoadScene(GameSceneName);
+        }
+
+        private void ShowAllOutWarLoadingState()
+        {
+            loadingGame = true;
+            if (protocolText != null)
+            {
+                protocolText.text = "BUILDING ALL OUT WAR";
+            }
+
+            if (allOutWarTotalText != null)
+            {
+                allOutWarTotalText.text = "Generating battlefield...";
+            }
+
+            foreach (var item in menuButtons)
+            {
+                if (item.Button != null)
+                {
+                    item.Button.interactable = false;
+                }
+
+                if (item.Slider != null)
+                {
+                    item.Slider.interactable = false;
+                }
+            }
+
+            Canvas.ForceUpdateCanvases();
+        }
+
+        private string GetSelectedAllOutWarMapStyle()
+        {
+            return AllOutWarMapStyleOptions[Mathf.Clamp(mapStyleIndex, 0, AllOutWarMapStyleOptions.Length - 1)];
+        }
+
+        private static int GetAllOutWarMapStyleOptionIndex(string value)
+        {
+            var displayName = AllOutWarMapStyleNames.ToDisplayName(AllOutWarMapStyleNames.Parse(value));
+            for (var i = 0; i < AllOutWarMapStyleOptions.Length; i++)
+            {
+                if (AllOutWarMapStyleOptions[i] == displayName)
+                {
+                    return i;
+                }
+            }
+
+            return 0;
         }
 
         private static void ExitGame()
@@ -1779,7 +1907,7 @@ namespace ArenaShooter
             });
         }
 
-        private void CreateOptionRow(Transform parent, string label, string value, float centerY, out Text valueText)
+        private MenuButtonVisual CreateOptionRow(Transform parent, string label, string[] values, int valueIndex, string optionKey, float centerY, out Text valueText)
         {
             var row = new GameObject(label + " Row");
             row.transform.SetParent(parent, false);
@@ -1805,17 +1933,21 @@ namespace ArenaShooter
             labelText.alignment = TextAnchor.MiddleLeft;
             Stretch(labelText.rectTransform, new Vector2(0.045f, 0.16f), new Vector2(0.42f, 0.84f), Vector2.zero, Vector2.zero);
 
-            valueText = CreateText(value.ToUpperInvariant(), row.transform, 16, FontStyle.Bold, new Color(1f, 0.94f, 0.26f, 1f));
+            valueText = CreateText("", row.transform, 16, FontStyle.Bold, new Color(1f, 0.94f, 0.26f, 1f));
             valueText.alignment = TextAnchor.MiddleRight;
             Stretch(valueText.rectTransform, new Vector2(0.42f, 0.16f), new Vector2(0.955f, 0.84f), Vector2.zero, Vector2.zero);
 
-            menuButtons.Add(new MenuButtonVisual
+            var visual = new MenuButtonVisual
             {
                 Rect = rowRect,
                 Background = rowBackground,
                 LeftAccent = leftAccent,
                 RightAccent = rightAccent,
                 Label = labelText,
+                ValueLabel = valueText,
+                OptionValues = values,
+                OptionIndex = valueIndex,
+                OptionKey = optionKey,
                 NormalBackgroundColor = new Color(0.025f, 0.043f, 0.048f, 0.94f),
                 SelectedBackgroundColor = new Color(0.115f, 0.18f, 0.19f, 0.99f),
                 NormalLeftAccentColor = new Color(0f, 0.82f, 1f, 0.68f),
@@ -1823,7 +1955,10 @@ namespace ArenaShooter
                 NormalRightAccentColor = new Color(0f, 0.82f, 1f, 0.68f),
                 SelectedRightAccentColor = new Color(1f, 0.94f, 0.12f, 1f),
                 SelectionAnimationTime = SelectionPopDuration,
-            });
+            };
+            SetMenuOptionIndex(visual, valueIndex);
+            menuButtons.Add(visual);
+            return visual;
         }
 
         private void ConfigureButtonNavigation()
@@ -1871,6 +2006,10 @@ namespace ArenaShooter
             public Slider Slider;
             public MenuCommand Command;
             public Text Label;
+            public Text ValueLabel;
+            public string[] OptionValues;
+            public int OptionIndex;
+            public string OptionKey;
             public Color NormalBackgroundColor;
             public Color SelectedBackgroundColor;
             public Color NormalLeftAccentColor;
@@ -1879,6 +2018,7 @@ namespace ArenaShooter
             public Color SelectedRightAccentColor;
             public float SelectionAnimationTime;
             public bool IsSelected;
+            public bool HasOptions => OptionValues != null && OptionValues.Length > 0;
         }
 
         private readonly struct MenuSliderAdjustment

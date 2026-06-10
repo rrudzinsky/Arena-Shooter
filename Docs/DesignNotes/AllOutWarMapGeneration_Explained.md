@@ -35,6 +35,10 @@ Those values are the contract between generation, visuals, collision, spawning, 
 
 The result is still a room graph, but the footprint is circular. This gives the tactical systems a simple room structure while the overall battlefield reads as a dome-contained arena.
 
+When the player chooses `Hilly`, generation treats hills as a real map-style promise, not just a noise preference. Normal All Out War Hilly maps reserve three to five visible terrain-only hills, while still keeping spawn fronts connected back toward a central buildable hub. Hills can appear in the central battlefield, including the exact center, and can appear toward team sides as long as they stay outside spawn regions and the immediate spawn buffer.
+
+Hilly maps use compact, medium, and large hill footprints. Compact and medium hills are still high, smooth, traversable terrain features; they simply use tighter crest, shoulder, no-structure, and spacing radii so room walls can sit closer to the slope. Hills may overlap at their outer shoulders so two nearby hills can read as a larger double hill, but their crest/core areas stay separated and the spawn-to-hub route check still has to pass. They should not read as little bumps, rocks, obelisks, or decorative obstacles. Large hills keep the more spacious footprint and remain the strongest candidates for hill-cut tunnels. Tunnel eligibility still depends on the hill being tall and wide enough to contain the unchanged octagonal tunnel size.
+
 ## Clearings
 
 Clearings are groups of nearby rooms that are treated as more open space. Internal walls between rooms in the same clearing are skipped, and corridors between clearing rooms become open floor links rather than narrow hallway chokepoints.
@@ -61,6 +65,20 @@ All Out War adds exceptions:
 - Edge rooms can open outward toward the dome wall so the map does not become a sealed tunnel network.
 
 This keeps the map structured without turning every perimeter spawn into a boxed room.
+
+## Tunnels
+
+All Out War can add a small number of procedural tunnel shortcuts. These are not army spawn tunnels; they are battlefield routes that help create flanks and alternate approaches.
+
+There are two tunnel types. Hill-cut tunnels run at the normal battlefield height and bore through eligible terrain-only hills. Subfloor tunnels begin from wall-owned portals on unused room sides, descend below the arena floor, snake through underground bend points, and ramp back up through another wall portal.
+
+Both tunnel endpoints and sampled tunnel paths avoid spawn arc-bands with extra padding. This keeps the perimeter spawn regions open and prevents armies from appearing directly beside an underground shortcut. Resources also avoid tunnel portal and ramp footprints.
+
+The tunnel visual language is an octagonal sci-fi corridor: faceted dark panels, portal frames, and neon edge strips. The motion-line concept from the reference image is intentionally not used. Tunnel bodies should render as continuous swept corridors with rounded bend samples, not disconnected straight box sections.
+
+Subfloor tunnels also require one-sided ramp-shaped cutouts in the continuous dome floor mesh and collider. Without those holes, the floor collider would cover the descending route and the runtime NavMesh would not bake the tunnel entrance correctly. A small colliding threshold covers the room-side wall handoff, and the underground middle stays below the floor without cutting the dome floor above it.
+
+Hill-cut tunnels are different: they do not descend. The terrain bore footprint is cut out of the hill so the tunnel remains walkable at normal floor height, then colliding hex-patterned terrain collars cover the cutout above and beside the passage so the hill reads as continuous from outside and does not leave fall-through gaps.
 
 ## Dome, Boundary, And Continuous Floor
 
@@ -94,7 +112,7 @@ The high-level flow is:
 
 1. Read All Out War settings.
 2. Compute grid radius from battlefield cap.
-3. Generate the circular layout, geometry, continuous floor, and boundary.
+3. Generate the circular layout, tunnel links, geometry, continuous floor, tunnel geometry, and boundary.
 4. Build dome visuals and lights.
 5. Bake runtime NavMesh.
 6. Create player at army 0 perimeter spawn.
@@ -105,7 +123,7 @@ The high-level flow is:
 
 ## Known Limitations
 
-The strategic structure is still a room graph. NavMesh improves movement, but map generation and squad objective selection still reason in rooms.
+The strategic structure is still a room graph. Tunnel endpoints add extra graph links for fallback routing, and NavMesh improves physical movement, but map generation and squad objective selection still reason mostly in rooms.
 
 The map does not currently use a full spatial influence map, terrain heatmap, or cover analysis pass.
 

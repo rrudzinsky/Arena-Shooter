@@ -32,6 +32,7 @@ namespace ArenaShooter
         private const float MinimumVaultOpeningTop = 0.78f;
         private const float MaximumVaultApproachDistance = 2.25f;
         private const float MaximumVaultPlaneDistance = 1.25f;
+        private const string WallOutlineSourceName = "Destructible Wall Outline Source";
         private const int MaxUnsupportedIslandSpraysPerDamage = 18;
         private const float UnsupportedIslandSpraySourceClearance = 0.035f;
         private const float UnsupportedIslandSprayMinLifetime = 0.42f;
@@ -123,6 +124,7 @@ namespace ArenaShooter
         private BoxCollider surfaceCollider;
         private Vector3Int chunkCounts;
         private bool initialized;
+        private bool chunkGridBuilt;
 
         public readonly struct PlayerVaultSolution
         {
@@ -447,11 +449,18 @@ namespace ArenaShooter
             destructibleBodyMaterial = null;
             clippedWallBodyMaterial = null;
             wallDamageStamps.Clear();
+            if (!initialized)
+            {
+                chunks.Clear();
+                chunksByIndex.Clear();
+                chunkGridBuilt = false;
+            }
+
             configuredBiteDirectionLocal = biteDirectionWorld.sqrMagnitude > 0.0001f
                 ? transform.InverseTransformDirection(biteDirectionWorld.normalized)
                 : Vector3.zero;
 
-            if (UsesContourOwnedWallDamage())
+            if (UsesContourOwnedWallDamage() || ShouldInitializeStartupStructuralWallBody())
             {
                 InitializeChunks();
             }
@@ -570,7 +579,7 @@ namespace ArenaShooter
             }
 
             initialized = true;
-            var originalRenderers = GetComponentsInChildren<Renderer>(true);
+            var originalRenderers = GetOriginalSourceRenderers();
             intactMaterial = configuredIntactMaterial != null ? configuredIntactMaterial : ResolveLargestRendererMaterial(originalRenderers);
             var sourceSize = GetSourceSize();
 
@@ -594,23 +603,16 @@ namespace ArenaShooter
             combinedMeshFilter = combined.AddComponent<MeshFilter>();
             combinedRenderer = combined.AddComponent<MeshRenderer>();
             combinedRenderer.sharedMaterial = GetDestructibleBodyMaterial();
-            DroidRenderSetup.ApplyRenderer(combinedRenderer, StylizedOutlineCategory.None);
+            ApplyGeneratedBodyRenderingLayer(combinedRenderer);
 
             if (!UsesContourOwnedWallDamage())
             {
-                BuildChunkGrid(sourceSize);
+                EnsureChunkGrid(sourceSize);
             }
 
-            if (configuredOutlineCategory != StylizedOutlineCategory.None && configuredOutlineCategory != StylizedOutlineCategory.Floor)
+            if (UsesStructuralWallOutlineSource())
             {
-                var outlineSource = new GameObject("Destructible Wall Outline Source");
-                outlineSource.transform.SetParent(transform, false);
-                outlineSourceMeshFilter = outlineSource.AddComponent<MeshFilter>();
-                outlineSourceRenderer = outlineSource.AddComponent<MeshRenderer>();
-                outlineSourceRenderer.sharedMaterial = GetOutlineProxyMaterial();
-                DroidRenderSetup.ApplyRenderer(outlineSourceRenderer, configuredOutlineCategory);
-
-                RebuildOutlineSourceMesh();
+                EnsureStructuralWallOutlineSource();
             }
 
             var contour = new GameObject("Destructible Damage Contours");
@@ -621,6 +623,77 @@ namespace ArenaShooter
             DroidRenderSetup.ApplyRenderer(damageContourRenderer, StylizedOutlineCategory.None);
 
             RebuildCombinedMesh();
+        }
+
+        private void ApplyGeneratedBodyRenderingLayer(Renderer renderer)
+        {
+            DroidRenderSetup.ApplyRenderer(renderer, StylizedOutlineCategory.None);
+            if (renderer != null && UsesStructuralWallOutlineSource())
+            {
+                renderer.renderingLayerMask |= DroidRenderSetup.WallRenderingLayer;
+            }
+        }
+
+        private Renderer[] GetOriginalSourceRenderers()
+        {
+            var renderers = GetComponentsInChildren<Renderer>(true);
+            var sourceRenderers = new List<Renderer>(renderers.Length);
+            foreach (var renderer in renderers)
+            {
+                if (renderer == null ||
+                    renderer == combinedRenderer ||
+                    renderer == outlineSourceRenderer ||
+                    renderer == damageContourRenderer)
+                {
+                    continue;
+                }
+
+                sourceRenderers.Add(renderer);
+            }
+
+            return sourceRenderers.ToArray();
+        }
+
+        private void EnsureStructuralWallOutlineSource()
+        {
+            if (!UsesStructuralWallOutlineSource())
+            {
+                return;
+            }
+
+            if (!UsesContourOwnedWallDamage())
+            {
+                EnsureChunkGrid(GetSourceSize());
+            }
+
+            if (outlineSourceMeshFilter == null || outlineSourceRenderer == null)
+            {
+                var outlineSource = transform.Find(WallOutlineSourceName);
+                var outlineSourceObject = outlineSource != null
+                    ? outlineSource.gameObject
+                    : new GameObject(WallOutlineSourceName);
+                if (outlineSource == null)
+                {
+                    outlineSourceObject.transform.SetParent(transform, false);
+                }
+
+                outlineSourceMeshFilter = outlineSourceObject.GetComponent<MeshFilter>();
+                if (outlineSourceMeshFilter == null)
+                {
+                    outlineSourceMeshFilter = outlineSourceObject.AddComponent<MeshFilter>();
+                }
+
+                outlineSourceRenderer = outlineSourceObject.GetComponent<MeshRenderer>();
+                if (outlineSourceRenderer == null)
+                {
+                    outlineSourceRenderer = outlineSourceObject.AddComponent<MeshRenderer>();
+                }
+            }
+
+            outlineSourceRenderer.enabled = true;
+            outlineSourceRenderer.sharedMaterial = GetOutlineProxyMaterial();
+            DroidRenderSetup.ApplyRenderer(outlineSourceRenderer, configuredOutlineCategory);
+            RebuildOutlineSourceMesh();
         }
 
         private void RebuildOutlineSourceMesh()
@@ -635,6 +708,15 @@ namespace ArenaShooter
             if (UsesContourOwnedWallDamage())
             {
                 AddContourOwnedWallOutlineSourceGeometry(vertices, triangles);
+                outlineSourceMeshFilter.sharedMesh = vertices.Count == 0
+                    ? null
+                    : CreateMesh("Destructible Wall Outline Source Mesh", vertices, new[] { triangles });
+                return;
+            }
+
+            if (UsesIntactCornerPillarWallOutlineSourceGeometry())
+            {
+                AddCornerPillarWallOutlineSourceGeometry(vertices, triangles);
                 outlineSourceMeshFilter.sharedMesh = vertices.Count == 0
                     ? null
                     : CreateMesh("Destructible Wall Outline Source Mesh", vertices, new[] { triangles });
@@ -659,6 +741,72 @@ namespace ArenaShooter
             }
 
             outlineSourceMeshFilter.sharedMesh = CreateMesh("Destructible Wall Outline Source Mesh", vertices, new[] { triangles });
+        }
+
+        private bool UsesIntactCornerPillarWallOutlineSourceGeometry()
+        {
+            if (damageProfile != DestructibleDamageProfile.CornerPillar ||
+                configuredOutlineCategory == StylizedOutlineCategory.Floor)
+            {
+                return false;
+            }
+
+            foreach (var chunk in chunks)
+            {
+                if (chunk.Destroyed)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private void AddCornerPillarWallOutlineSourceGeometry(List<Vector3> vertices, List<int> triangles)
+        {
+            var sourceSize = GetSourceSize();
+            if (sourceSize.x <= 0.01f || sourceSize.y <= 0.01f || sourceSize.z <= 0.01f)
+            {
+                return;
+            }
+
+            AddCornerPillarWallOutlinePlane(vertices, triangles, sourceSize, Vector3.right, true);
+            AddCornerPillarWallOutlinePlane(vertices, triangles, sourceSize, Vector3.left, true);
+            AddCornerPillarWallOutlinePlane(vertices, triangles, sourceSize, Vector3.forward, true);
+            AddCornerPillarWallOutlinePlane(vertices, triangles, sourceSize, Vector3.back, true);
+            AddCornerPillarWallOutlinePlane(vertices, triangles, sourceSize, Vector3.up, false);
+        }
+
+        private void AddCornerPillarWallOutlinePlane(
+            List<Vector3> vertices,
+            List<int> triangles,
+            Vector3 sourceSize,
+            Vector3 normal,
+            bool sinkFloorEdge)
+        {
+            GetFaceBasis(normal, sourceSize, out var n, out var u, out var v, out var halfN, out var halfU, out var halfV);
+            var bounds = new DamageComponentPlaneBounds(-halfU, halfU, -halfV, halfV);
+            if (!bounds.IsValid || halfN <= 0f)
+            {
+                return;
+            }
+
+            if (sinkFloorEdge)
+            {
+                bounds = SinkContourOwnedWallOutlineFloorEdge(bounds, u, v);
+            }
+
+            AddContourOwnedWallPlaneQuad(
+                vertices,
+                triangles,
+                n,
+                u,
+                v,
+                halfN + WallOutlineProxyDepthOffset,
+                bounds.MinU,
+                bounds.MaxU,
+                bounds.MinV,
+                bounds.MaxV);
         }
 
         private HashSet<Chunk> BuildOutlineProxySolidChunkSet()
@@ -984,8 +1132,20 @@ namespace ArenaShooter
             return new Vector3(Mathf.Abs(transform.localScale.x), Mathf.Abs(transform.localScale.y), Mathf.Abs(transform.localScale.z));
         }
 
+        private void EnsureChunkGrid(Vector3 size)
+        {
+            if (chunkGridBuilt)
+            {
+                return;
+            }
+
+            BuildChunkGrid(size);
+        }
+
         private void BuildChunkGrid(Vector3 size)
         {
+            chunks.Clear();
+            chunksByIndex.Clear();
             var counts = new Vector3Int(
                 CalculateCellCount(size.x),
                 CalculateCellCount(size.y),
@@ -1012,6 +1172,8 @@ namespace ArenaShooter
                     }
                 }
             }
+
+            chunkGridBuilt = true;
         }
 
         private Vector3 GetWallNormalLocal()
@@ -1164,6 +1326,18 @@ namespace ArenaShooter
         {
             return damageProfile == DestructibleDamageProfile.Wall &&
                 configuredOutlineCategory != StylizedOutlineCategory.Floor;
+        }
+
+        private bool UsesStructuralWallOutlineSource()
+        {
+            return configuredOutlineCategory != StylizedOutlineCategory.None &&
+                configuredOutlineCategory != StylizedOutlineCategory.Floor;
+        }
+
+        private bool ShouldInitializeStartupStructuralWallBody()
+        {
+            return damageProfile == DestructibleDamageProfile.CornerPillar &&
+                UsesStructuralWallOutlineSource();
         }
 
         private DamageStamp AddContourOwnedWallDamage(Vector3 hitPoint)

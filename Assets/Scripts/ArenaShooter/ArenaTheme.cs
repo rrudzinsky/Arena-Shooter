@@ -26,11 +26,11 @@ namespace ArenaShooter
 
         public ArenaTheme()
         {
-            Floor = CreateUnlit("Synthwave Matte Black Floor", new Color(0.0015f, 0.001f, 0.004f));
+            Floor = CreateLit("Synthwave Matte Black Floor", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             Wall = CreateLit("Synthwave Matte Black Wall", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             Pillar = CreateLit("Synthwave Matte Black Pillar", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             Ceiling = CreateLit("Synthwave Matte Black Ceiling", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
-            GateInterior = CreateUnlit("Gate Interior Matte Black Floor", new Color(0.002f, 0.0015f, 0.006f));
+            GateInterior = CreateLit("Gate Interior Matte Black Floor", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             GateEndWall = CreateLit("Spawn Corridor Matte Black Rear Wall", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             FloorGrid = CreateUnlit("Clean Violet Floor Line", new Color(0.72f, 0.16f, 1.25f), new Color(0.72f, 0.16f, 1.25f));
             NeonA = CreateUnlit("Clean Cyan Neon", new Color(0.08f, 1.32f, 1.72f), new Color(0.08f, 1.32f, 1.72f));

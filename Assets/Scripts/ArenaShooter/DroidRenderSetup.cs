@@ -12,7 +12,9 @@ namespace ArenaShooter
         Droid,
         Medical,
         Ammo,
-        Gun
+        Gun,
+        FirstPersonPistol,
+        FirstPersonPistolSight
     }
 
     public static class DroidRenderSetup
@@ -26,6 +28,9 @@ namespace ArenaShooter
         public const uint MedicalRenderingLayer = 1u << 4;
         public const uint AmmoRenderingLayer = 1u << 5;
         public const uint GunRenderingLayer = 1u << 6;
+        public const uint FirstPersonWeaponOccluderRenderingLayer = 1u << 7;
+        public const uint FirstPersonPistolRenderingLayer = 1u << 8;
+        public const uint FirstPersonPistolSightRenderingLayer = 1u << 9;
         public const float DefaultOutlineIntensity = 1.1f;
         private const int MaxAssignmentExampleLogsPerCategory = 8;
         private static readonly Dictionary<StylizedOutlineCategory, int> AssignmentCounts = new Dictionary<StylizedOutlineCategory, int>();
@@ -69,6 +74,22 @@ namespace ArenaShooter
             LogAssignment(renderer != null ? renderer.gameObject : null, category, renderingLayerMask, renderer != null ? new[] { renderer } : null);
         }
 
+        public static void AddFirstPersonWeaponOccluder(Renderer renderer)
+        {
+            if (renderer == null)
+            {
+                return;
+            }
+
+            renderer.renderingLayerMask |= FirstPersonWeaponOccluderRenderingLayer;
+        }
+
+        public static bool HasFirstPersonWeaponOccluder(Renderer renderer)
+        {
+            return renderer != null &&
+                (renderer.renderingLayerMask & FirstPersonWeaponOccluderRenderingLayer) != 0;
+        }
+
         public static uint ResolveRenderingLayerMask(StylizedOutlineCategory category)
         {
             return category switch
@@ -79,6 +100,8 @@ namespace ArenaShooter
                 StylizedOutlineCategory.Medical => MedicalRenderingLayer,
                 StylizedOutlineCategory.Ammo => AmmoRenderingLayer,
                 StylizedOutlineCategory.Gun => GunRenderingLayer,
+                StylizedOutlineCategory.FirstPersonPistol => FirstPersonPistolRenderingLayer,
+                StylizedOutlineCategory.FirstPersonPistolSight => FirstPersonPistolSightRenderingLayer,
                 _ => DefaultRenderingLayer
             };
         }
@@ -93,6 +116,8 @@ namespace ArenaShooter
                 StylizedOutlineCategory.Medical => new Color(1.8f, 0.18f, 0.38f, 1f),
                 StylizedOutlineCategory.Ammo => new Color(1.9f, 1.48f, 0.16f, 1f),
                 StylizedOutlineCategory.Gun => new Color(0.12f, 1.85f, 2.25f, 1f),
+                StylizedOutlineCategory.FirstPersonPistol => new Color(0.12f, 1.85f, 2.25f, 1f),
+                StylizedOutlineCategory.FirstPersonPistolSight => new Color(0.12f, 1.85f, 2.25f, 1f),
                 _ => Color.clear
             };
         }
@@ -138,6 +163,21 @@ namespace ArenaShooter
             if (renderingLayerMask == GunRenderingLayer)
             {
                 return "Gun";
+            }
+
+            if (renderingLayerMask == FirstPersonPistolRenderingLayer)
+            {
+                return "FirstPersonPistol";
+            }
+
+            if (renderingLayerMask == FirstPersonPistolSightRenderingLayer)
+            {
+                return "FirstPersonPistolSight";
+            }
+
+            if (renderingLayerMask == FirstPersonWeaponOccluderRenderingLayer)
+            {
+                return "FirstPersonWeaponOccluder";
             }
 
             if (renderingLayerMask == DefaultRenderingLayer)

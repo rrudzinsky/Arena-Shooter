@@ -91,9 +91,10 @@ namespace ArenaShooter
                 CreatePrimitive("Grip", PrimitiveType.Cube, theme.Wall, new Vector3(0.03f, -0.16f, -0.05f), new Vector3(0.12f, 0.28f, 0.12f), new Vector3(-16f, 0f, 0f), weaponRoot);
                 ammoCore = CreatePrimitive("Ammo Core", PrimitiveType.Cube, theme.Pickup, new Vector3(-0.09f, 0.03f, 0.04f), new Vector3(0.035f, 0.18f, 0.28f), Vector3.zero, weaponRoot).transform;
                 muzzleGlow = CreatePrimitive("Muzzle Glow", PrimitiveType.Sphere, theme.Beam, new Vector3(0.02f, 0.08f, 0.54f), new Vector3(0.09f, 0.09f, 0.09f), Vector3.zero, weaponRoot).transform;
+                DroidRenderSetup.Apply(weaponRoot.gameObject, StylizedOutlineCategory.FirstPersonPistol);
+                MarkFirstPersonWeaponOccluders(weaponRoot);
             }
 
-            DroidRenderSetup.Apply(weaponRoot.gameObject, StylizedOutlineCategory.Gun);
             Muzzle = muzzleGlow;
             BuildPistolGripHand(theme);
             BuildSprintHands(theme);
@@ -530,7 +531,7 @@ namespace ArenaShooter
 
             if (primitive.TryGetComponent<Collider>(out var collider))
             {
-                Destroy(collider);
+                ImportedModelUtility.DestroyObject(collider);
             }
 
             if (primitive.TryGetComponent<Renderer>(out var renderer))
@@ -540,6 +541,19 @@ namespace ArenaShooter
             }
 
             return primitive;
+        }
+
+        private static void MarkFirstPersonWeaponOccluders(Transform root)
+        {
+            if (root == null)
+            {
+                return;
+            }
+
+            foreach (var renderer in root.GetComponentsInChildren<Renderer>(true))
+            {
+                DroidRenderSetup.AddFirstPersonWeaponOccluder(renderer);
+            }
         }
     }
 }

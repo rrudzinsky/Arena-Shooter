@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "mcp-unity": {
+      "command": "node",
+      "args": [
+        "Library/PackageCache/com.gamelovers.mcp-unity@a32e47d4ec87/Server~/build/index.js"
+      ]
+    },
+    "blender": {
+      "command": "C:/Users/rrudz/miniconda3/envs/basic_science/python.exe",
+      "args": ["-m", "blmcp"],
+      "env": {
+        "BLENDER_MCP_HOST": "127.0.0.1",
+        "BLENDER_MCP_PORT": "9876",
+        "PATH": "C:\\Users\\rrudz\\miniconda3\\envs\\basic_science;C:\\Users\\rrudz\\miniconda3\\envs\\basic_science\\Library\\mingw-w64\\bin;C:\\Users\\rrudz\\miniconda3\\envs\\basic_science\\Library\\usr\\bin;C:\\Users\\rrudz\\miniconda3\\envs\\basic_science\\Library\\bin;C:\\Users\\rrudz\\miniconda3\\envs\\basic_science\\Scripts;C:\\Windows\\System32;C:\\Windows"
+      }
+    }
+  }
+}

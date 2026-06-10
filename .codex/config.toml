@@ -22,3 +22,6 @@ approval_mode = "approve"
 
 [mcp_servers.mcp-unity.tools.batch_execute]
 approval_mode = "approve"
+
+[mcp_servers.mcp-unity.tools.run_tests]
+approval_mode = "approve"

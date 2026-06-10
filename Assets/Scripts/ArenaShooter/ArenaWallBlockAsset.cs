@@ -11,7 +11,7 @@ namespace ArenaShooter
         private const string ResourceAssetPath = "Assets/Resources/Models/CyberArenaWallBlock.fbx";
         private const string ResourcePath = "Models/CyberArenaWallBlock";
 
-        public static bool TryBuild(Transform parent, ArenaTheme theme, Vector3 position, Vector3 scale, Material baseMaterial, out GameObject wrapper)
+        public static bool TryBuild(Transform parent, Vector3 position, Vector3 scale, out GameObject wrapper)
         {
             wrapper = null;
             var prefab = LoadModelPrefab();
@@ -24,26 +24,25 @@ namespace ArenaShooter
             wrapper.transform.SetParent(parent, false);
             wrapper.transform.position = position;
             wrapper.transform.rotation = Quaternion.identity;
-            wrapper.transform.localScale = scale;
+            wrapper.transform.localScale = Vector3.one;
 
             var instance = Object.Instantiate(prefab, wrapper.transform, false);
             instance.name = "Imported Cyber Arena Wall Block Mesh";
             instance.transform.localPosition = Vector3.zero;
-            ApplyVisualTransform(instance.transform);
+            ApplyVisualTransform(instance.transform, scale);
             ImportedModelUtility.RemoveColliders(instance);
 
             var box = wrapper.AddComponent<BoxCollider>();
-            box.size = Vector3.one;
-            ApplyThemeMaterials(wrapper, theme, baseMaterial);
+            box.size = scale;
             DroidRenderSetup.Apply(wrapper, StylizedOutlineCategory.Wall);
             ImportedModelUtility.LogModelInstanceDiagnostics("Arena wall block imported model", wrapper);
             return true;
         }
 
-        private static void ApplyVisualTransform(Transform visual)
+        private static void ApplyVisualTransform(Transform visual, Vector3 scale)
         {
             visual.localRotation = Quaternion.identity;
-            visual.localScale = Vector3.one;
+            visual.localScale = scale;
         }
 
         private static GameObject LoadModelPrefab()
@@ -67,26 +66,5 @@ namespace ArenaShooter
 #endif
         }
 
-        private static void ApplyThemeMaterials(GameObject instance, ArenaTheme theme, Material baseMaterial)
-        {
-            foreach (var renderer in instance.GetComponentsInChildren<Renderer>(true))
-            {
-                var materials = renderer.sharedMaterials;
-                for (var i = 0; i < materials.Length; i++)
-                {
-                    materials[i] = ResolveThemeMaterial(renderer.name, materials[i], theme, baseMaterial);
-                }
-
-                renderer.sharedMaterials = materials;
-            }
-        }
-
-        private static Material ResolveThemeMaterial(string rendererName, Material source, ArenaTheme theme, Material baseMaterial)
-        {
-            var materialName = source != null ? source.name : string.Empty;
-            var key = $"{rendererName} {materialName}".ToLowerInvariant();
-
-            return baseMaterial != null ? baseMaterial : theme.Wall;
-        }
     }
 }

@@ -12,10 +12,12 @@ namespace ArenaShooter
         private const int TextRenderQueue = 3000;
         private const float ScoreRefreshInterval = 0.25f;
         private const float EqualizerRefreshInterval = 0.075f;
-        private const float BoardLatitude = 0.5f;
+        private const float BoardLatitude = 0.3f;
         private const float DomeVerticalUnitsPerLatitude = 226f;
         private const float MeshSegmentLength = 3.2f;
         private const float ScoreboardMeshSegmentLength = 1.6f;
+        private const float ScoreboardMonitorMountInset = -92f;
+        private const float ScoreboardMonitorDownTiltDegrees = 8f;
         private const float DetailRadiusInset = -1.6f;
         private const float ScoreboardBackInset = -8.0f;
         private const float ScoreboardPanelInset = -8.5f;
@@ -25,28 +27,29 @@ namespace ArenaShooter
         private const float ScoreboardDetailInset = -9.85f;
         private const float ScoreboardFillInset = -10.15f;
         private const float ScoreboardTextInset = -10.65f;
-        private const float ScoreboardMonitorPitchDegrees = 10f;
         private const float ScoreboardDomeClearance = 2f;
-        private const float BoardOuterBorderThickness = 1.8f;
-        private const float BoardInnerBorderThickness = 1.0f;
-        private const float BoardBorderGap = 1.1f;
+        private const float BoardOuterBorderThickness = 1.25f;
+        private const float BoardInnerBorderThickness = 0.7f;
+        private const float BoardBorderGap = 0.75f;
 
-        private const float BoardWidth = 180f;
-        private const float BoardCornerCut = 9.5f;
-        private const float BoardTopPadding = 7.4f;
-        private const float BoardBottomPadding = 7.2f;
-        private const float HeaderHeight = 13f;
-        private const float HeaderRowGap = 5.2f;
+        private const float ScoreboardLocalScale = 0.8f;
+        private const float BoardWidth = 146f;
+        private const float RowContentWidth = 138f;
+        private const float BoardCornerRadius = 7.0f;
+        private const float BoardTopPadding = 3.2f;
+        private const float BoardBottomPadding = 5.8f;
+        private const float HeaderHeight = 8.2f;
+        private const float HeaderRowGap = 2.8f;
         private const float RowHeight = 11f;
         private const float RowStride = 13.2f;
-        private const float RowFillWidth = 78f;
-        private const float RowFillBackWidth = 81f;
+        private const float RowFillWidth = 62f;
+        private const float RowFillBackWidth = 65f;
         private const float RowFillHeight = 2.85f;
         private const float RowFillBackHeight = 3.7f;
-        private const float RowLabelX = 60f;
-        private const float RowCountX = -66.5f;
-        private const float RowFillCenterX = -6.5f;
-        private const float HeaderTextSize = 6.2f;
+        private const float RowLabelX = 52f;
+        private const float RowCountX = -55.5f;
+        private const float RowFillCenterX = -3.5f;
+        private const float HeaderTextSize = 5.8f;
         private const float RowLabelTextSize = 4.2f;
         private const float RowCountTextSize = 5.2f;
 
@@ -59,6 +62,7 @@ namespace ArenaShooter
         private const float EqualizerTileGap = 2.0f;
         private const float EqualizerBaseY = -20f;
         private const float EqualizerLineThickness = 0.58f;
+        private const float EqualizerBlueBandEnd = 0.24f;
 
         private readonly List<ArmyRow> rows = new();
         private readonly List<EqualizerColumn> equalizerColumns = new();
@@ -173,25 +177,25 @@ namespace ArenaShooter
             var rowStartY = headerY - HeaderHeight * 0.5f - HeaderRowGap - RowHeight * 0.5f;
             for (var army = 0; army < builtArmyCount; army++)
             {
-                CreateArmyRow(root.transform, patch, army, rowStartY - army * RowStride, boardWidth);
+                CreateArmyRow(root.transform, patch, army, rowStartY - army * RowStride);
             }
         }
 
         private void CreateReferenceScoreboardFrame(Transform parent, DomePatch patch, Vector2 boardSize)
         {
-            CreateCurvedClippedPanel("Board Shadow Glass Bed", parent, patch, Vector2.zero, boardSize + new Vector2(14f, 10f), BoardCornerCut + 5f, ScoreboardBackInset, panelMaterial);
-            CreateCurvedClippedPanel("Board Black Glass", parent, patch, Vector2.zero, boardSize - new Vector2(4.8f, 3.9f), Mathf.Max(1.2f, BoardCornerCut - 2.2f), ScoreboardPanelInset, panelMaterial);
+            CreateCurvedRoundedPanel("Board Shadow Glass Bed", parent, patch, Vector2.zero, boardSize + new Vector2(7f, 4.2f), BoardCornerRadius + 2.2f, ScoreboardBackInset, panelMaterial);
+            CreateCurvedRoundedPanel("Board Black Glass", parent, patch, Vector2.zero, boardSize - new Vector2(3.2f, 3f), Mathf.Max(1.2f, BoardCornerRadius - 1.2f), ScoreboardPanelInset, panelMaterial);
 
-            var outerBorderSize = boardSize + new Vector2(10f, 7.5f);
+            var outerBorderSize = boardSize + new Vector2(4.4f, 3.2f);
             var innerBorderSize = outerBorderSize - Vector2.one * ((BoardOuterBorderThickness + BoardBorderGap) * 2f);
-            CreateCurvedClippedBorder("Outer Neon Purple Border", parent, patch, Vector2.zero, outerBorderSize, BoardCornerCut + 3.8f, BoardOuterBorderThickness, ScoreboardOuterBorderInset, hotPurpleRailMaterial);
-            CreateCurvedClippedBorder("Inner Neon Purple Border", parent, patch, Vector2.zero, innerBorderSize, BoardCornerCut + 1.4f, BoardInnerBorderThickness, ScoreboardInnerBorderInset, hotPurpleRailMaterial);
+            CreateCurvedRoundedBorder("Outer Neon Purple Border", parent, patch, Vector2.zero, outerBorderSize, BoardCornerRadius + 1.4f, BoardOuterBorderThickness, ScoreboardOuterBorderInset, hotPurpleRailMaterial);
+            CreateCurvedRoundedBorder("Inner Neon Purple Border", parent, patch, Vector2.zero, innerBorderSize, BoardCornerRadius - 0.2f, BoardInnerBorderThickness, ScoreboardInnerBorderInset, hotPurpleRailMaterial);
         }
 
-        private void CreateArmyRow(Transform parent, DomePatch patch, int army, float rowY, float boardWidth)
+        private void CreateArmyRow(Transform parent, DomePatch patch, int army, float rowY)
         {
             var armyMaterial = GetArmyMaterial(army);
-            var rowWidth = boardWidth - 18f;
+            var rowWidth = RowContentWidth;
             var rowSize = new Vector2(rowWidth, RowHeight);
             CreateCurvedClippedPanel("Row Black Glass", parent, patch, new Vector2(0f, rowY), rowSize, 2.8f, ScoreboardRowInset, rowBackMaterial);
 
@@ -230,12 +234,13 @@ namespace ArenaShooter
 
             for (var columnIndex = 0; columnIndex < EqualizerColumnCount; columnIndex++)
             {
-                var t = EqualizerColumnCount > 1 ? columnIndex / (float)(EqualizerColumnCount - 1) : 0f;
+                var colorT = EqualizerColumnCount > 1 ? columnIndex / (float)(EqualizerColumnCount - 1) : 0f;
+                var behaviorT = GetEqualizerBehaviorT(colorT);
                 var phi = columnIndex / (float)EqualizerColumnCount * Mathf.PI * 2f;
                 var patch = new DomePatch(phi, EqualizerCenterLatitude, 0f);
-                var skylineTiles = GetEqualizerSkylineTiles(t, columnIndex);
+                var skylineTiles = GetEqualizerSkylineTiles(behaviorT, columnIndex);
 
-                var color = GetEqualizerColor(t);
+                var color = GetEqualizerColor(colorT);
                 var material = CreateUnlitMaterial($"Dome Equalizer Column {columnIndex + 1}", color * 0.72f, color * 2.15f);
 
                 var columnObject = new GameObject($"Equalizer Column {columnIndex + 1:000}");
@@ -253,6 +258,7 @@ namespace ArenaShooter
                     BaseColor = color,
                     LocalX = 0f,
                     SkylineTiles = skylineTiles,
+                    BehaviorT = behaviorT,
                     Phase = columnIndex * 0.371f + 4.7f,
                     CurrentLevel = 0f,
                     LastActiveTiles = -1
@@ -291,11 +297,11 @@ namespace ArenaShooter
             for (var i = 0; i < equalizerColumns.Count; i++)
             {
                 var column = equalizerColumns[i];
-                var t = equalizerColumns.Count > 1 ? i / (float)(equalizerColumns.Count - 1) : 0f;
+                var behaviorT = column.BehaviorT;
                 var spectrumLevel = 0f;
                 if (hasSpectrum)
                 {
-                    var bin = Mathf.Clamp(Mathf.RoundToInt(Mathf.Pow(t, 1.45f) * (spectrumSamples.Length - 1)), 0, spectrumSamples.Length - 1);
+                    var bin = Mathf.Clamp(Mathf.RoundToInt(Mathf.Pow(behaviorT, 1.45f) * (spectrumSamples.Length - 1)), 0, spectrumSamples.Length - 1);
                     var neighbor = Mathf.Min(spectrumSamples.Length - 1, bin + 1);
                     spectrumLevel = Mathf.Clamp01((spectrumSamples[bin] + spectrumSamples[neighbor] * 0.65f) * 95f);
                     spectrumLevel = Mathf.Pow(spectrumLevel, 0.58f);
@@ -387,6 +393,30 @@ namespace ArenaShooter
             panel.transform.SetParent(parent, false);
             var mesh = new Mesh { name = $"{objectName} Dome Mesh" };
             WriteCurvedClippedBorderMesh(mesh, patch, localCenter, size, cornerCut, thickness, radiusInset);
+            panel.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var renderer = panel.AddComponent<MeshRenderer>();
+            ConfigureRenderer(renderer, material);
+            return panel;
+        }
+
+        private GameObject CreateCurvedRoundedPanel(string objectName, Transform parent, DomePatch patch, Vector2 localCenter, Vector2 size, float cornerRadius, float radiusInset, Material material)
+        {
+            var panel = new GameObject(objectName);
+            panel.transform.SetParent(parent, false);
+            var mesh = new Mesh { name = $"{objectName} Dome Mesh" };
+            WriteCurvedRoundedPanelMesh(mesh, patch, localCenter, size, cornerRadius, radiusInset);
+            panel.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var renderer = panel.AddComponent<MeshRenderer>();
+            ConfigureRenderer(renderer, material);
+            return panel;
+        }
+
+        private GameObject CreateCurvedRoundedBorder(string objectName, Transform parent, DomePatch patch, Vector2 localCenter, Vector2 size, float cornerRadius, float thickness, float radiusInset, Material material)
+        {
+            var panel = new GameObject(objectName);
+            panel.transform.SetParent(parent, false);
+            var mesh = new Mesh { name = $"{objectName} Dome Mesh" };
+            WriteCurvedRoundedBorderMesh(mesh, patch, localCenter, size, cornerRadius, thickness, radiusInset);
             panel.AddComponent<MeshFilter>().sharedMesh = mesh;
             var renderer = panel.AddComponent<MeshRenderer>();
             ConfigureRenderer(renderer, material);
@@ -595,11 +625,70 @@ namespace ArenaShooter
             mesh.RecalculateBounds();
         }
 
+        private void WriteCurvedRoundedPanelMesh(Mesh mesh, DomePatch patch, Vector2 localCenter, Vector2 size, float cornerRadius, float radiusInset)
+        {
+            var xSegments = Mathf.Clamp(Mathf.CeilToInt(size.x / ScoreboardMeshSegmentLength), 1, 96);
+            var ySegments = Mathf.Clamp(Mathf.CeilToInt(size.y / (ScoreboardMeshSegmentLength * 0.7f)), 2, 96);
+            var vertices = new Vector3[(xSegments + 1) * (ySegments + 1)];
+            var triangles = new int[xSegments * ySegments * 6];
+            var halfWidth = size.x * 0.5f;
+            var halfHeight = size.y * 0.5f;
+            var radius = ClampCornerRadius(size, cornerRadius);
+
+            for (var yIndex = 0; yIndex <= ySegments; yIndex++)
+            {
+                var yT = yIndex / (float)ySegments;
+                var localY = Mathf.Lerp(-halfHeight, halfHeight, yT);
+                var xShrink = GetRoundedCornerShrink(localY, halfHeight, radius);
+                var xMin = -halfWidth + xShrink;
+                var xMax = halfWidth - xShrink;
+
+                for (var xIndex = 0; xIndex <= xSegments; xIndex++)
+                {
+                    var xT = xIndex / (float)xSegments;
+                    var localX = Mathf.Lerp(xMin, xMax, xT);
+                    vertices[yIndex * (xSegments + 1) + xIndex] = ScoreboardPoint(patch, localCenter + new Vector2(localX, localY), radiusInset);
+                }
+            }
+
+            var triangleIndex = 0;
+            for (var yIndex = 0; yIndex < ySegments; yIndex++)
+            {
+                for (var xIndex = 0; xIndex < xSegments; xIndex++)
+                {
+                    var a = yIndex * (xSegments + 1) + xIndex;
+                    var b = a + xSegments + 1;
+                    var c = a + 1;
+                    var d = b + 1;
+                    triangles[triangleIndex++] = a;
+                    triangles[triangleIndex++] = b;
+                    triangles[triangleIndex++] = c;
+                    triangles[triangleIndex++] = c;
+                    triangles[triangleIndex++] = b;
+                    triangles[triangleIndex++] = d;
+                }
+            }
+
+            mesh.Clear();
+            mesh.vertices = vertices;
+            mesh.triangles = triangles;
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+        }
+
         private void WriteCurvedClippedBorderMesh(Mesh mesh, DomePatch patch, Vector2 localCenter, Vector2 size, float cornerCut, float thickness, float radiusInset)
         {
             var vertices = new List<Vector3>();
             var triangles = new List<int>();
             AddScoreboardClippedBorderGeometry(vertices, triangles, patch, localCenter, size, cornerCut, thickness, radiusInset);
+            WriteMesh(mesh, vertices, triangles);
+        }
+
+        private void WriteCurvedRoundedBorderMesh(Mesh mesh, DomePatch patch, Vector2 localCenter, Vector2 size, float cornerRadius, float thickness, float radiusInset)
+        {
+            var vertices = new List<Vector3>();
+            var triangles = new List<int>();
+            AddScoreboardRoundedBorderGeometry(vertices, triangles, patch, localCenter, size, cornerRadius, thickness, radiusInset);
             WriteMesh(mesh, vertices, triangles);
         }
 
@@ -658,6 +747,123 @@ namespace ArenaShooter
         private void AddDomeHollowRectGeometry(List<Vector3> vertices, List<int> triangles, DomePatch patch, Vector2 center, Vector2 size, float thickness, float radiusInset)
         {
             AddDomeClippedBorderGeometry(vertices, triangles, patch, center, size, 0f, thickness, radiusInset);
+        }
+
+        private void AddScoreboardRoundedBorderGeometry(List<Vector3> vertices, List<int> triangles, DomePatch patch, Vector2 center, Vector2 size, float cornerRadius, float thickness, float radiusInset)
+        {
+            var borderInset = Mathf.Min(thickness, Mathf.Min(size.x, size.y) * 0.45f);
+            if (borderInset <= 0.001f)
+            {
+                return;
+            }
+
+            var innerSize = new Vector2(size.x - borderInset * 2f, size.y - borderInset * 2f);
+            if (innerSize.x <= 0.001f || innerSize.y <= 0.001f)
+            {
+                return;
+            }
+
+            var outerRadius = ClampCornerRadius(size, cornerRadius);
+            var innerRadius = ClampCornerRadius(innerSize, Mathf.Max(0.001f, cornerRadius - borderInset));
+            var outerHalfWidth = size.x * 0.5f;
+            var outerHalfHeight = size.y * 0.5f;
+            var innerHalfWidth = innerSize.x * 0.5f;
+            var innerHalfHeight = innerSize.y * 0.5f;
+            var topBottomLength = Mathf.Max(size.x - outerRadius * 2f, innerSize.x - innerRadius * 2f);
+            var sideLength = Mathf.Max(size.y - outerRadius * 2f, innerSize.y - innerRadius * 2f);
+            var horizontalSegments = Mathf.Clamp(Mathf.CeilToInt(topBottomLength / ScoreboardMeshSegmentLength), 1, 96);
+            var verticalSegments = Mathf.Clamp(Mathf.CeilToInt(sideLength / ScoreboardMeshSegmentLength), 1, 64);
+            var arcSegments = Mathf.Clamp(Mathf.CeilToInt(Mathf.PI * outerRadius * 0.5f / (ScoreboardMeshSegmentLength * 0.7f)), 4, 24);
+            var baseIndex = vertices.Count;
+
+            AddRoundedLinePair(vertices, patch, center,
+                new Vector2(-outerHalfWidth + outerRadius, outerHalfHeight),
+                new Vector2(outerHalfWidth - outerRadius, outerHalfHeight),
+                new Vector2(-innerHalfWidth + innerRadius, innerHalfHeight),
+                new Vector2(innerHalfWidth - innerRadius, innerHalfHeight),
+                horizontalSegments,
+                radiusInset);
+            AddRoundedArcPair(vertices, patch, center,
+                new Vector2(outerHalfWidth - outerRadius, outerHalfHeight - outerRadius),
+                new Vector2(innerHalfWidth - innerRadius, innerHalfHeight - innerRadius),
+                outerRadius,
+                innerRadius,
+                90f,
+                0f,
+                arcSegments,
+                radiusInset);
+            AddRoundedLinePair(vertices, patch, center,
+                new Vector2(outerHalfWidth, outerHalfHeight - outerRadius),
+                new Vector2(outerHalfWidth, -outerHalfHeight + outerRadius),
+                new Vector2(innerHalfWidth, innerHalfHeight - innerRadius),
+                new Vector2(innerHalfWidth, -innerHalfHeight + innerRadius),
+                verticalSegments,
+                radiusInset);
+            AddRoundedArcPair(vertices, patch, center,
+                new Vector2(outerHalfWidth - outerRadius, -outerHalfHeight + outerRadius),
+                new Vector2(innerHalfWidth - innerRadius, -innerHalfHeight + innerRadius),
+                outerRadius,
+                innerRadius,
+                0f,
+                -90f,
+                arcSegments,
+                radiusInset);
+            AddRoundedLinePair(vertices, patch, center,
+                new Vector2(outerHalfWidth - outerRadius, -outerHalfHeight),
+                new Vector2(-outerHalfWidth + outerRadius, -outerHalfHeight),
+                new Vector2(innerHalfWidth - innerRadius, -innerHalfHeight),
+                new Vector2(-innerHalfWidth + innerRadius, -innerHalfHeight),
+                horizontalSegments,
+                radiusInset);
+            AddRoundedArcPair(vertices, patch, center,
+                new Vector2(-outerHalfWidth + outerRadius, -outerHalfHeight + outerRadius),
+                new Vector2(-innerHalfWidth + innerRadius, -innerHalfHeight + innerRadius),
+                outerRadius,
+                innerRadius,
+                -90f,
+                -180f,
+                arcSegments,
+                radiusInset);
+            AddRoundedLinePair(vertices, patch, center,
+                new Vector2(-outerHalfWidth, -outerHalfHeight + outerRadius),
+                new Vector2(-outerHalfWidth, outerHalfHeight - outerRadius),
+                new Vector2(-innerHalfWidth, -innerHalfHeight + innerRadius),
+                new Vector2(-innerHalfWidth, innerHalfHeight - innerRadius),
+                verticalSegments,
+                radiusInset);
+            AddRoundedArcPair(vertices, patch, center,
+                new Vector2(-outerHalfWidth + outerRadius, outerHalfHeight - outerRadius),
+                new Vector2(-innerHalfWidth + innerRadius, innerHalfHeight - innerRadius),
+                outerRadius,
+                innerRadius,
+                180f,
+                90f,
+                arcSegments,
+                radiusInset);
+
+            AddClosedRingTriangles(triangles, baseIndex, (vertices.Count - baseIndex) / 2);
+        }
+
+        private void AddRoundedLinePair(List<Vector3> vertices, DomePatch patch, Vector2 center, Vector2 outerStart, Vector2 outerEnd, Vector2 innerStart, Vector2 innerEnd, int segments, float radiusInset)
+        {
+            for (var i = 0; i < segments; i++)
+            {
+                var t = i / (float)segments;
+                vertices.Add(ScoreboardPoint(patch, center + Vector2.Lerp(outerStart, outerEnd, t), radiusInset));
+                vertices.Add(ScoreboardPoint(patch, center + Vector2.Lerp(innerStart, innerEnd, t), radiusInset));
+            }
+        }
+
+        private void AddRoundedArcPair(List<Vector3> vertices, DomePatch patch, Vector2 center, Vector2 outerCenter, Vector2 innerCenter, float outerRadius, float innerRadius, float startDegrees, float endDegrees, int segments, float radiusInset)
+        {
+            for (var i = 0; i < segments; i++)
+            {
+                var t = i / (float)segments;
+                var angle = Mathf.Lerp(startDegrees, endDegrees, t) * Mathf.Deg2Rad;
+                var direction = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+                vertices.Add(ScoreboardPoint(patch, center + outerCenter + direction * outerRadius, radiusInset));
+                vertices.Add(ScoreboardPoint(patch, center + innerCenter + direction * innerRadius, radiusInset));
+            }
         }
 
         private void AddScoreboardClippedBorderGeometry(List<Vector3> vertices, List<int> triangles, DomePatch patch, Vector2 center, Vector2 size, float cornerCut, float thickness, float radiusInset)
@@ -746,20 +952,26 @@ namespace ArenaShooter
 
         private Vector3 ScoreboardPoint(DomePatch patch, Vector2 localPosition, float radiusInset)
         {
-            var rolled = patch.Roll(localPosition);
+            var rolled = patch.Roll(ScaleScoreboardLocalPosition(localPosition));
             var centerTheta = AllOutWarStadiumVisuals.LatitudeToTheta(patch.Latitude);
             var bendRadius = Mathf.Max(1f, metrics.Radius * Mathf.Cos(centerTheta));
             var centerY = metrics.BaseY + metrics.Height * Mathf.Sin(centerTheta);
             var verticalScale = GetScoreboardVerticalWorldScale(patch.Latitude);
             var verticalOffset = rolled.y * verticalScale;
-            var pitchRadians = ScoreboardMonitorPitchDegrees * Mathf.Deg2Rad;
-            var surfaceRadius = Mathf.Max(1f, bendRadius + radiusInset - verticalOffset * Mathf.Sin(pitchRadians));
-            var phi = patch.Phi + rolled.x / bendRadius;
+            var monitorRadius = Mathf.Max(1f, bendRadius + ScoreboardMonitorMountInset);
+            var tiltRadians = ScoreboardMonitorDownTiltDegrees * Mathf.Deg2Rad;
+            var surfaceRadius = Mathf.Max(1f, monitorRadius + radiusInset - verticalOffset * Mathf.Sin(tiltRadians));
+            var phi = patch.Phi + rolled.x / monitorRadius;
             var point = metrics.Center + new Vector3(
                 Mathf.Cos(phi) * surfaceRadius,
-                centerY + verticalOffset * Mathf.Cos(pitchRadians),
+                centerY + verticalOffset * Mathf.Cos(tiltRadians),
                 Mathf.Sin(phi) * surfaceRadius);
             return ClampScoreboardPointInsideDome(point, radiusInset);
+        }
+
+        private static Vector2 ScaleScoreboardLocalPosition(Vector2 localPosition)
+        {
+            return localPosition * ScoreboardLocalScale;
         }
 
         private Vector3 DomePoint(DomePatch patch, Vector2 localPosition, float radiusInset)
@@ -849,6 +1061,28 @@ namespace ArenaShooter
             return Mathf.Clamp(cornerCut - edgeDistance, 0f, cornerCut);
         }
 
+        private static float GetRoundedCornerShrink(float localY, float halfHeight, float cornerRadius)
+        {
+            if (cornerRadius <= 0.001f)
+            {
+                return 0f;
+            }
+
+            var edgeDistance = halfHeight - Mathf.Abs(localY);
+            if (edgeDistance >= cornerRadius)
+            {
+                return 0f;
+            }
+
+            var radiusDelta = cornerRadius - Mathf.Max(0f, edgeDistance);
+            return cornerRadius - Mathf.Sqrt(Mathf.Max(0f, cornerRadius * cornerRadius - radiusDelta * radiusDelta));
+        }
+
+        private static float ClampCornerRadius(Vector2 size, float cornerRadius)
+        {
+            return Mathf.Clamp(cornerRadius, 0f, Mathf.Min(size.x, size.y) * 0.5f - 0.001f);
+        }
+
         private static float ClampCornerCut(Vector2 size, float cornerCut, bool forceClipped)
         {
             if (!forceClipped)
@@ -911,9 +1145,9 @@ namespace ArenaShooter
 
         private static Color GetEqualizerColor(float t)
         {
-            if (t < 0.24f)
+            if (t < EqualizerBlueBandEnd)
             {
-                return Color.Lerp(new Color(0.02f, 0.46f, 1.65f, 1f), new Color(0.02f, 0.9f, 2.4f, 1f), t / 0.24f);
+                return Color.Lerp(new Color(0.02f, 0.46f, 1.65f, 1f), new Color(0.02f, 0.9f, 2.4f, 1f), t / EqualizerBlueBandEnd);
             }
 
             if (t < 0.52f)
@@ -927,6 +1161,16 @@ namespace ArenaShooter
             }
 
             return Color.Lerp(new Color(2.0f, 0.62f, 0.02f, 1f), new Color(2.45f, 1.92f, 0.02f, 1f), (t - 0.78f) / 0.22f);
+        }
+
+        private static float GetEqualizerBehaviorT(float colorT)
+        {
+            if (colorT < EqualizerBlueBandEnd)
+            {
+                return Mathf.Lerp(EqualizerBlueBandEnd, 1f, Mathf.Clamp01(colorT / EqualizerBlueBandEnd));
+            }
+
+            return colorT;
         }
 
         private static void WriteMesh(Mesh mesh, List<Vector3> vertices, List<int> triangles)
@@ -1165,6 +1409,7 @@ namespace ArenaShooter
             public Color BaseColor;
             public float LocalX;
             public int SkylineTiles;
+            public float BehaviorT;
             public float Phase;
             public float CurrentLevel;
             public int LastActiveTiles;

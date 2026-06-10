@@ -154,18 +154,51 @@ MonoBehaviour:
       enabled: 1
       renderingLayerMask: 64
       outlineColor: {r: 0.12, g: 1.85, b: 2.25, a: 1}
-      hardEdgePixels: 0.45
-      glowPixels: 0.85
-      intensity: 0.96
-      glowStrength: 0.16
-      hardEdgeStrength: 0.98
-      alphaEdgeStrength: 1
-      normalEdgeStrength: 0.12
-      normalEdgeThreshold: 0.13
+      hardEdgePixels: 0.55
+      glowPixels: 0.55
+      intensity: 1.45
+      glowStrength: 0
+      hardEdgeStrength: 1.12
+      alphaEdgeStrength: 0.9
+      normalEdgeStrength: 0.9
+      normalEdgeThreshold: 0.08
       distanceFadeStart: 24
       distanceFadeEnd: 76
       distantHardEdgeScale: 0.5
-      distantGlowScale: 0.16
+      distantGlowScale: 0.2
+    - name: First Person Pistol Cyan
+      enabled: 1
+      renderingLayerMask: 256
+      outlineColor: {r: 0.12, g: 1.85, b: 2.25, a: 1}
+      hardEdgePixels: 0.5
+      glowPixels: 0.5
+      intensity: 1.45
+      glowStrength: 0
+      hardEdgeStrength: 1.12
+      alphaEdgeStrength: 0.9
+      normalEdgeStrength: 0.12
+      normalEdgeThreshold: 0.18
+      distanceFadeStart: 24
+      distanceFadeEnd: 76
+      distantHardEdgeScale: 0.5
+      distantGlowScale: 0.2
+    - name: First Person Pistol Sight Cyan
+      enabled: 1
+      renderingLayerMask: 512
+      outlineColor: {r: 0.12, g: 1.85, b: 2.25, a: 1}
+      hardEdgePixels: 0.5
+      glowPixels: 0.5
+      intensity: 1.45
+      glowStrength: 0
+      hardEdgeStrength: 1.12
+      alphaEdgeStrength: 0.9
+      normalEdgeStrength: 0
+      outsideOnlyAlphaEdge: 1
+      normalEdgeThreshold: 0.18
+      distanceFadeStart: 24
+      distanceFadeEnd: 76
+      distantHardEdgeScale: 0.5
+      distantGlowScale: 0.2
     thicknessPixels: 1
     glowPixels: 2
     downsample: 1
@@ -176,6 +209,7 @@ MonoBehaviour:
     distantHardEdgeScale: 0.48
     distantGlowScale: 0.24
     useReferenceNeonStyle: 1
+    suppressWorldOutlinesBehindFirstPersonWeapon: 1
     diagnosticMode: 0
     diagnosticBandIndex: -1
     diagnosticIgnoreRenderingLayerFilter: 0

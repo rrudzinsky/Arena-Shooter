@@ -10,6 +10,7 @@ namespace ArenaShooter
         public readonly List<Vector3> PickupPoints = new();
         public readonly List<ArenaGateSpawn> GateSpawns = new();
         public readonly List<ArmySpawnRegion> ArmySpawnRegions = new();
+        public readonly List<ArenaTunnelRoute> TunnelRoutes = new();
         public readonly List<Vector3> ClearingCenters = new();
         public readonly Dictionary<Vector2Int, int> ClearingRoomGroups = new();
 
@@ -63,8 +64,19 @@ namespace ArenaShooter
         {
             point = Vector3.zero;
             var delta = to - from;
-            if (!Rooms.Contains(from) || !Rooms.Contains(to) || Mathf.Abs(delta.x) + Mathf.Abs(delta.y) != 1)
+            if (!Rooms.Contains(from) || !Rooms.Contains(to))
             {
+                return false;
+            }
+
+            if (Mathf.Abs(delta.x) + Mathf.Abs(delta.y) != 1)
+            {
+                if (TryGetTunnelRoute(from, to, out var tunnel))
+                {
+                    point = tunnel.GetTraversalPoint(from);
+                    return true;
+                }
+
                 return false;
             }
 
@@ -75,6 +87,34 @@ namespace ArenaShooter
 
             point = (fromCenter + toCenter) * 0.5f;
             return true;
+        }
+
+        public bool TryGetTunnelRoute(Vector2Int from, Vector2Int to, out ArenaTunnelRoute route)
+        {
+            foreach (var tunnel in TunnelRoutes)
+            {
+                if (tunnel != null && tunnel.Connects(from, to))
+                {
+                    route = tunnel;
+                    return true;
+                }
+            }
+
+            route = null;
+            return false;
+        }
+
+        public bool IsTunnelReservedPosition(Vector3 position, float extraPadding = 0f)
+        {
+            foreach (var tunnel in TunnelRoutes)
+            {
+                if (tunnel != null && tunnel.ContainsReservedPosition(position, extraPadding))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         public bool AreRoomsInSameClearing(Vector2Int a, Vector2Int b)
@@ -135,6 +175,7 @@ namespace ArenaShooter
 
         private IEnumerable<Vector2Int> GetNeighbors(Vector2Int room)
         {
+            var emitted = new HashSet<Vector2Int>();
             var directions = new[]
             {
                 Vector2Int.up,
@@ -146,11 +187,491 @@ namespace ArenaShooter
             foreach (var direction in directions)
             {
                 var neighbor = room + direction;
-                if (Rooms.Contains(neighbor))
+                if (Rooms.Contains(neighbor) && emitted.Add(neighbor))
                 {
                     yield return neighbor;
                 }
             }
+
+            foreach (var tunnel in TunnelRoutes)
+            {
+                if (tunnel == null || !tunnel.TryGetOtherRoom(room, out var other))
+                {
+                    continue;
+                }
+
+                if (Rooms.Contains(other) && emitted.Add(other))
+                {
+                    yield return other;
+                }
+            }
+        }
+    }
+
+    public enum ArenaTunnelKind
+    {
+        HillCut,
+        Subfloor
+    }
+
+    public enum ArenaTunnelEntranceMode
+    {
+        WallPortal,
+        HillsideMouth
+    }
+
+    public sealed class ArenaTunnelRoute
+    {
+        public ArenaTunnelRoute(
+            ArenaTunnelKind kind,
+            Vector2Int fromRoom,
+            Vector2Int toRoom,
+            Vector2Int fromDirection,
+            Vector2Int toDirection,
+            Vector3 fromPortal,
+            Vector3 toPortal,
+            float width,
+            float height,
+            float subfloorDepth,
+            float rampLength,
+            float portalRadius)
+            : this(
+                kind,
+                fromRoom,
+                toRoom,
+                fromDirection,
+                toDirection,
+                fromPortal,
+                toPortal,
+                width,
+                height,
+                subfloorDepth,
+                rampLength,
+                portalRadius,
+                DefaultEntranceMode(kind),
+                DefaultEntranceMode(kind),
+                -1)
+        {
+        }
+
+        public ArenaTunnelRoute(
+            ArenaTunnelKind kind,
+            Vector2Int fromRoom,
+            Vector2Int toRoom,
+            Vector2Int fromDirection,
+            Vector2Int toDirection,
+            Vector3 fromPortal,
+            Vector3 toPortal,
+            float width,
+            float height,
+            float subfloorDepth,
+            float rampLength,
+            float portalRadius,
+            int hillRegionIndex)
+            : this(
+                kind,
+                fromRoom,
+                toRoom,
+                fromDirection,
+                toDirection,
+                fromPortal,
+                toPortal,
+                width,
+                height,
+                subfloorDepth,
+                rampLength,
+                portalRadius,
+                DefaultEntranceMode(kind),
+                DefaultEntranceMode(kind),
+                hillRegionIndex)
+        {
+        }
+
+        public ArenaTunnelRoute(
+            ArenaTunnelKind kind,
+            Vector2Int fromRoom,
+            Vector2Int toRoom,
+            Vector2Int fromDirection,
+            Vector2Int toDirection,
+            Vector3 fromPortal,
+            Vector3 toPortal,
+            float width,
+            float height,
+            float subfloorDepth,
+            float rampLength,
+            float portalRadius,
+            ArenaTunnelEntranceMode fromEntranceMode,
+            ArenaTunnelEntranceMode toEntranceMode)
+            : this(
+                kind,
+                fromRoom,
+                toRoom,
+                fromDirection,
+                toDirection,
+                fromPortal,
+                toPortal,
+                width,
+                height,
+                subfloorDepth,
+                rampLength,
+                portalRadius,
+                fromEntranceMode,
+                toEntranceMode,
+                -1)
+        {
+        }
+
+        public ArenaTunnelRoute(
+            ArenaTunnelKind kind,
+            Vector2Int fromRoom,
+            Vector2Int toRoom,
+            Vector2Int fromDirection,
+            Vector2Int toDirection,
+            Vector3 fromPortal,
+            Vector3 toPortal,
+            float width,
+            float height,
+            float subfloorDepth,
+            float rampLength,
+            float portalRadius,
+            ArenaTunnelEntranceMode fromEntranceMode,
+            ArenaTunnelEntranceMode toEntranceMode,
+            int hillRegionIndex)
+            : this(
+                kind,
+                fromRoom,
+                toRoom,
+                fromDirection,
+                toDirection,
+                fromPortal,
+                toPortal,
+                width,
+                height,
+                subfloorDepth,
+                rampLength,
+                portalRadius,
+                fromEntranceMode,
+                toEntranceMode,
+                hillRegionIndex,
+                hillRegionIndex)
+        {
+        }
+
+        public ArenaTunnelRoute(
+            ArenaTunnelKind kind,
+            Vector2Int fromRoom,
+            Vector2Int toRoom,
+            Vector2Int fromDirection,
+            Vector2Int toDirection,
+            Vector3 fromPortal,
+            Vector3 toPortal,
+            float width,
+            float height,
+            float subfloorDepth,
+            float rampLength,
+            float portalRadius,
+            int fromHillRegionIndex,
+            int toHillRegionIndex)
+            : this(
+                kind,
+                fromRoom,
+                toRoom,
+                fromDirection,
+                toDirection,
+                fromPortal,
+                toPortal,
+                width,
+                height,
+                subfloorDepth,
+                rampLength,
+                portalRadius,
+                DefaultEntranceMode(kind),
+                DefaultEntranceMode(kind),
+                fromHillRegionIndex,
+                toHillRegionIndex)
+        {
+        }
+
+        public ArenaTunnelRoute(
+            ArenaTunnelKind kind,
+            Vector2Int fromRoom,
+            Vector2Int toRoom,
+            Vector2Int fromDirection,
+            Vector2Int toDirection,
+            Vector3 fromPortal,
+            Vector3 toPortal,
+            float width,
+            float height,
+            float subfloorDepth,
+            float rampLength,
+            float portalRadius,
+            ArenaTunnelEntranceMode fromEntranceMode,
+            ArenaTunnelEntranceMode toEntranceMode,
+            int fromHillRegionIndex,
+            int toHillRegionIndex)
+        {
+            Kind = kind;
+            FromRoom = fromRoom;
+            ToRoom = toRoom;
+            FromDirection = NormalizeCardinal(fromDirection);
+            ToDirection = NormalizeCardinal(toDirection);
+            FromEntranceMode = fromEntranceMode;
+            ToEntranceMode = toEntranceMode;
+            FromPortal = fromPortal;
+            ToPortal = toPortal;
+            Width = Mathf.Max(0.1f, width);
+            Height = Mathf.Max(0.1f, height);
+            SubfloorDepth = Mathf.Max(0f, subfloorDepth);
+            RampLength = Mathf.Max(0f, rampLength);
+            PortalRadius = Mathf.Max(0.1f, portalRadius);
+            FromHillRegionIndex = kind == ArenaTunnelKind.HillCut ? fromHillRegionIndex : -1;
+            ToHillRegionIndex = kind == ArenaTunnelKind.HillCut ? toHillRegionIndex : -1;
+            HillRegionIndex = FromHillRegionIndex;
+            routeWaypoints = BuildRouteWaypoints();
+        }
+
+        private readonly Vector3[] routeWaypoints;
+
+        public ArenaTunnelKind Kind { get; }
+        public Vector2Int FromRoom { get; }
+        public Vector2Int ToRoom { get; }
+        public Vector2Int FromDirection { get; }
+        public Vector2Int ToDirection { get; }
+        public ArenaTunnelEntranceMode FromEntranceMode { get; }
+        public ArenaTunnelEntranceMode ToEntranceMode { get; }
+        public Vector3 FromPortal { get; }
+        public Vector3 ToPortal { get; }
+        public float Width { get; }
+        public float Height { get; }
+        public float SubfloorDepth { get; }
+        public float RampLength { get; }
+        public float PortalRadius { get; }
+        public int HillRegionIndex { get; }
+        public int FromHillRegionIndex { get; }
+        public int ToHillRegionIndex { get; }
+
+        public Vector3 FlatDirection
+        {
+            get
+            {
+                var direction = ToPortal - FromPortal;
+                direction.y = 0f;
+                return direction.sqrMagnitude > 0.001f ? direction.normalized : Vector3.forward;
+            }
+        }
+
+        public Vector3 FromWorldDirection => ToWorldDirection(FromDirection);
+        public Vector3 ToWorldDirectionValue => ToWorldDirection(ToDirection);
+        public Vector3 FromSubfloorPoint => FromPortal + FromWorldDirection * RampLength + Vector3.down * SubfloorDepth;
+        public Vector3 ToSubfloorPoint => ToPortal + ToWorldDirectionValue * RampLength + Vector3.down * SubfloorDepth;
+        public IReadOnlyList<Vector3> Waypoints => routeWaypoints;
+
+        public bool Connects(Vector2Int a, Vector2Int b)
+        {
+            return (FromRoom == a && ToRoom == b) || (FromRoom == b && ToRoom == a);
+        }
+
+        public bool TryGetOtherRoom(Vector2Int room, out Vector2Int other)
+        {
+            if (room == FromRoom)
+            {
+                other = ToRoom;
+                return true;
+            }
+
+            if (room == ToRoom)
+            {
+                other = FromRoom;
+                return true;
+            }
+
+            other = default;
+            return false;
+        }
+
+        public Vector3 GetTraversalPoint(Vector2Int fromRoom)
+        {
+            return fromRoom == FromRoom ? ToPortal : FromPortal;
+        }
+
+        public bool ContainsReservedPosition(Vector3 position, float extraPadding = 0f)
+        {
+            var padding = Mathf.Max(0f, extraPadding);
+            var portalRadius = PortalRadius + padding;
+            if (FlatDistance(position, FromPortal) <= portalRadius ||
+                FlatDistance(position, ToPortal) <= portalRadius)
+            {
+                return true;
+            }
+
+            var halfWidth = Width * 0.68f + padding;
+            for (var i = 1; i < routeWaypoints.Length; i++)
+            {
+                if (FlatDistanceToSegment(position, routeWaypoints[i - 1], routeWaypoints[i]) <= halfWidth)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private Vector3[] BuildRouteWaypoints()
+        {
+            if (Kind == ArenaTunnelKind.Subfloor)
+            {
+                return BuildSubfloorRouteWaypoints();
+            }
+
+            var leadLength = Mathf.Max(PortalRadius * 0.75f, Width * 0.82f);
+            return new[]
+            {
+                FromPortal,
+                FromPortal + FromWorldDirection * leadLength,
+                ToPortal + ToWorldDirectionValue * leadLength,
+                ToPortal
+            };
+        }
+
+        private Vector3[] BuildSubfloorRouteWaypoints()
+        {
+            var undergroundStart = FromSubfloorPoint;
+            var undergroundEnd = ToSubfloorPoint;
+            var direct = undergroundEnd - undergroundStart;
+            direct.y = 0f;
+            if (direct.sqrMagnitude <= 0.001f)
+            {
+                return new[]
+                {
+                    FromPortal,
+                    undergroundStart,
+                    undergroundEnd,
+                    ToPortal
+                };
+            }
+
+            var flatLength = direct.magnitude;
+            var leadLength = Mathf.Min(
+                Mathf.Max(Width * 1.45f, RampLength * 0.55f),
+                Mathf.Max(Width * 1.45f, flatLength * 0.26f));
+            var fromLead = undergroundStart + FromWorldDirection * leadLength;
+            var toLead = undergroundEnd + ToWorldDirectionValue * leadLength;
+            var snakeDirect = toLead - fromLead;
+            snakeDirect.y = 0f;
+            if (snakeDirect.sqrMagnitude <= Width * Width)
+            {
+                return new[]
+                {
+                    FromPortal,
+                    undergroundStart,
+                    undergroundEnd,
+                    ToPortal
+                };
+            }
+
+            var forward = snakeDirect.normalized;
+            var side = new Vector3(-forward.z, 0f, forward.x);
+            var sideSign = (BuildRouteHash() & 1) == 0 ? 1f : -1f;
+            var snakeLength = snakeDirect.magnitude;
+            var bendOffset = Mathf.Clamp(snakeLength * 0.12f, Width * 0.75f, Width * 1.65f);
+            var firstBend = Vector3.Lerp(fromLead, toLead, 0.35f) + side * (bendOffset * sideSign);
+            var secondBend = Vector3.Lerp(fromLead, toLead, 0.68f) - side * (bendOffset * 0.82f * sideSign);
+            fromLead.y = -SubfloorDepth;
+            firstBend.y = -SubfloorDepth;
+            secondBend.y = -SubfloorDepth;
+            toLead.y = -SubfloorDepth;
+
+            return new[]
+            {
+                FromPortal,
+                undergroundStart,
+                fromLead,
+                firstBend,
+                secondBend,
+                toLead,
+                undergroundEnd,
+                ToPortal
+            };
+        }
+
+        private int BuildRouteHash()
+        {
+            unchecked
+            {
+                var hash = 17;
+                hash = hash * 31 + FromRoom.x;
+                hash = hash * 31 + FromRoom.y;
+                hash = hash * 31 + ToRoom.x;
+                hash = hash * 31 + ToRoom.y;
+                hash = hash * 31 + FromDirection.x;
+                hash = hash * 31 + FromDirection.y;
+                hash = hash * 31 + ToDirection.x;
+                hash = hash * 31 + ToDirection.y;
+                return hash;
+            }
+        }
+
+        private static ArenaTunnelEntranceMode DefaultEntranceMode(ArenaTunnelKind kind)
+        {
+            return kind == ArenaTunnelKind.HillCut
+                ? ArenaTunnelEntranceMode.HillsideMouth
+                : ArenaTunnelEntranceMode.WallPortal;
+        }
+
+        private static Vector2Int NormalizeCardinal(Vector2Int direction)
+        {
+            if (Mathf.Abs(direction.x) >= Mathf.Abs(direction.y))
+            {
+                if (direction.x > 0)
+                {
+                    return Vector2Int.right;
+                }
+
+                if (direction.x < 0)
+                {
+                    return Vector2Int.left;
+                }
+            }
+
+            if (direction.y > 0)
+            {
+                return Vector2Int.up;
+            }
+
+            if (direction.y < 0)
+            {
+                return Vector2Int.down;
+            }
+
+            return Vector2Int.up;
+        }
+
+        private static Vector3 ToWorldDirection(Vector2Int direction)
+        {
+            return new Vector3(direction.x, 0f, direction.y).normalized;
+        }
+
+        private static float FlatDistance(Vector3 a, Vector3 b)
+        {
+            a.y = 0f;
+            b.y = 0f;
+            return Vector3.Distance(a, b);
+        }
+
+        private static float FlatDistanceToSegment(Vector3 point, Vector3 start, Vector3 end)
+        {
+            var p = new Vector2(point.x, point.z);
+            var a = new Vector2(start.x, start.z);
+            var b = new Vector2(end.x, end.z);
+            var ab = b - a;
+            var lengthSqr = ab.sqrMagnitude;
+            if (lengthSqr <= 0.001f)
+            {
+                return Vector2.Distance(p, a);
+            }
+
+            var t = Mathf.Clamp01(Vector2.Dot(p - a, ab) / lengthSqr);
+            return Vector2.Distance(p, a + ab * t);
         }
     }
 

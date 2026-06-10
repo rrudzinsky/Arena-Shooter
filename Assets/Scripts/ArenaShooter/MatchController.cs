@@ -109,6 +109,18 @@ namespace ArenaShooter
         private bool playerRespawning;
         private bool allOutWarMatchEnded;
 
+        private sealed class AllOutWarStartupTimer
+        {
+            private readonly System.Diagnostics.Stopwatch total = System.Diagnostics.Stopwatch.StartNew();
+            private readonly System.Diagnostics.Stopwatch phase = System.Diagnostics.Stopwatch.StartNew();
+
+            public void Mark(string phaseName)
+            {
+                Debug.Log($"[Arena Shooter] All Out War startup - {phaseName}: {phase.ElapsedMilliseconds} ms ({total.ElapsedMilliseconds} ms total).");
+                phase.Restart();
+            }
+        }
+
         private sealed class AllOutWarSettings
         {
             public int OpponentArmies;
@@ -124,7 +136,7 @@ namespace ArenaShooter
                     OpponentArmies = Mathf.Clamp(PlayerPrefs.GetInt("AllOutWarOpponentArmies", 3), 1, 7),
                     SoldiersPerArmy = Mathf.Clamp(PlayerPrefs.GetInt("AllOutWarSoldiersPerArmy", 100), 1, 500),
                     BattlefieldCap = Mathf.Clamp(PlayerPrefs.GetInt("AllOutWarBattlefieldCap", 80), 1, 600),
-                    MapStyle = PlayerPrefs.GetString("AllOutWarMapStyle", "Randomly Generate")
+                    MapStyle = AllOutWarMapStyleNames.ToDisplayName(AllOutWarMapStyleNames.Parse(PlayerPrefs.GetString("AllOutWarMapStyle", AllOutWarMapStyleNames.RandomlyGenerate)))
                 };
             }
         }
@@ -2951,8 +2963,10 @@ namespace ArenaShooter
 
         private void StartAllOutWarMatch()
         {
+            var startupTimer = new AllOutWarStartupTimer();
             ResetSharedMatchState();
             allOutWarSettings = AllOutWarSettings.FromPlayerPrefs();
+            startupTimer.Mark("settings/reset");
 
             theme = new ArenaTheme();
             matchRoot = new GameObject("Generated All Out War Match");
@@ -2964,16 +2978,21 @@ namespace ArenaShooter
 
             var chosenSeed = randomizeSeed || seed == 0 ? Random.Range(1000, 999999) : seed;
             var totalArmies = allOutWarSettings.TotalArmies;
+            var mapStyle = allOutWarSettings.MapStyle ?? AllOutWarMapStyleNames.RandomlyGenerate;
             var baseWarGridRadius = CalculateAllOutWarGridRadius(totalArmies, allOutWarSettings.BattlefieldCap);
-            var terrainGridBonus = ArenaGenerator.EstimateAllOutWarTerrainGridBonus(chosenSeed, roomSize + corridorLength);
+            var terrainGridBonus = ArenaGenerator.EstimateAllOutWarTerrainGridBonus(chosenSeed, roomSize + corridorLength, mapStyle);
             var warGridRadius = Mathf.Clamp(baseWarGridRadius + terrainGridBonus, 4, 9);
             var warRoomCount = Mathf.Clamp(Mathf.CeilToInt(Mathf.PI * warGridRadius * warGridRadius), 24, 260);
-            var layout = generator.GenerateAllOutWar(theme, matchRoot.transform, chosenSeed, totalArmies, warRoomCount, warGridRadius, roomSize, corridorLength, corridorWidth, wallHeight, weaponPickupCount + healthPickupCount);
+            startupTimer.Mark("root/setup");
+            var layout = generator.GenerateAllOutWar(theme, matchRoot.transform, chosenSeed, totalArmies, warRoomCount, warGridRadius, roomSize, corridorLength, corridorWidth, wallHeight, weaponPickupCount + healthPickupCount, mapStyle);
             currentLayout = layout;
+            startupTimer.Mark("layout/terrain/tunnel generation");
 
             ShieldDomeBackdrop.Build(matchRoot.transform, layout, roomSize, wallHeight);
             AddLighting(layout);
+            startupTimer.Mark("shield/lighting");
             BuildAllOutWarNavMesh(matchRoot.transform, layout);
+            startupTimer.Mark("NavMesh bake");
 
             var playerRegion = layout.ArmySpawnRegions.Count > 0 ? layout.ArmySpawnRegions[0] : null;
             var playerSpawn = playerRegion != null ? playerRegion.GetSpawnPosition(0) : layout.PlayerSpawn;
@@ -2982,6 +3001,7 @@ namespace ArenaShooter
             playerObject = player;
             AssignTeam(player, 0);
             EquipAllOutWarPlayerWeapon();
+            startupTimer.Mark("player setup");
 
             CreateAllOutWarPickups(layout);
             CreateAllOutWarHealthItems(layout);
@@ -2989,15 +3009,19 @@ namespace ArenaShooter
             hud?.SetWaveCountdown("");
             hud?.SetCenterMessage("");
             Rendering.DroidOutlineRendererFeature.LogRuntimeRendererCategorySummary("after All Out War setup");
+            startupTimer.Mark("pickup/HUD setup");
 
             playerCombatant.Died += OnPlayerDied;
             InitializeAllOutWarSpawning();
             CreateAllOutWarDomeScoreboards(layout);
+            startupTimer.Mark("spawning/scoreboard setup");
 
             IsMatchActive = true;
             SpawnInitialAllOutWarSoldiers(layout, player.transform);
+            startupTimer.Mark("initial soldier spawn");
             StartCoroutine(RunAllOutWarPickupRefillLoop());
             waveRoutine = StartCoroutine(RunAllOutWarLoop(player.transform, layout));
+            startupTimer.Mark("startup complete");
         }
 
         private static int CalculateAllOutWarGridRadius(int totalArmies, int battlefieldCap)
@@ -3064,10 +3088,11 @@ namespace ArenaShooter
             surface.overrideTileSize = true;
             surface.tileSize = 128;
             surface.minRegionArea = Mathf.Max(2f, roomSize * roomSize * 0.08f);
+            var timer = System.Diagnostics.Stopwatch.StartNew();
             surface.BuildNavMesh();
 
             var triangulation = NavMesh.CalculateTriangulation();
-            Debug.Log($"[Arena Shooter] All Out War runtime NavMesh built with {triangulation.vertices.Length} vertices.");
+            Debug.Log($"[Arena Shooter] All Out War runtime NavMesh built with {triangulation.vertices.Length} vertices in {timer.ElapsedMilliseconds} ms.");
         }
 
         private void ClearPreviousMatch()
@@ -4522,7 +4547,7 @@ namespace ArenaShooter
                 }
             }
 
-            return false;
+            return layout.IsTunnelReservedPosition(position, extraPadding);
         }
 
         private static bool IsAllOutWarSpawnRoom(ArenaLayout layout, Vector2Int room)
