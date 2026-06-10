@@ -416,7 +416,7 @@ public sealed class DestructibleArenaPieceIslandTests
         InvokeRemoveUnsupportedWallIslands();
 
         Assert.That(CountSprayBurstObjects(), Is.Zero);
-        Assert.That(CountHiddenCleanupStamps(), Is.EqualTo(1));
+        Assert.That(CountHiddenCleanupStamps(), Is.GreaterThanOrEqualTo(1));
         Assert.That(IsPointInsideWallDamageUnion(Vector2.zero), Is.True);
         Assert.That(FindUnsupportedIslandCount(CreateBounds(-0.5f, 0.5f, -0.5f, 0.5f)), Is.Zero);
     }

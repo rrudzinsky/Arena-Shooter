@@ -371,6 +371,7 @@ namespace ArenaShooter
             public int VerticalStart;
             public int VerticalEnd;
             public int Hops = int.MaxValue;
+            public float Bottleneck = float.PositiveInfinity;
             public int ComponentLabel = -1;
         }
 
@@ -1603,7 +1604,7 @@ namespace ArenaShooter
             return runsByColumn;
         }
 
-        private static void ComputeCantileverHops(List<CantileverRun>[] runsByColumn)
+        private static void ComputeCantileverHops(List<CantileverRun>[] runsByColumn, float verticalStep)
         {
             var queue = new Queue<CantileverRun>();
             for (var h = 0; h < runsByColumn.Length; h++)
@@ -1620,8 +1621,8 @@ namespace ArenaShooter
             while (queue.Count > 0)
             {
                 var current = queue.Dequeue();
-                RelaxCantileverNeighbors(runsByColumn, current, current.HorizontalIndex - 1, queue);
-                RelaxCantileverNeighbors(runsByColumn, current, current.HorizontalIndex + 1, queue);
+                RelaxCantileverNeighbors(runsByColumn, current, current.HorizontalIndex - 1, verticalStep, queue);
+                RelaxCantileverNeighbors(runsByColumn, current, current.HorizontalIndex + 1, verticalStep, queue);
             }
         }
 
@@ -1629,6 +1630,7 @@ namespace ArenaShooter
             List<CantileverRun>[] runsByColumn,
             CantileverRun current,
             int neighborColumn,
+            float verticalStep,
             Queue<CantileverRun> queue)
         {
             if (neighborColumn < 0 || neighborColumn >= runsByColumn.Length)
@@ -1645,7 +1647,10 @@ namespace ArenaShooter
                     continue;
                 }
 
+                var overlapCells = Mathf.Min(neighbor.VerticalEnd, current.VerticalEnd) -
+                    Mathf.Max(neighbor.VerticalStart, current.VerticalStart) + 1;
                 neighbor.Hops = current.Hops + 1;
+                neighbor.Bottleneck = Mathf.Min(current.Bottleneck, overlapCells * verticalStep);
                 queue.Enqueue(neighbor);
             }
         }
@@ -1708,45 +1713,18 @@ namespace ArenaShooter
             }
         }
 
-        private static int MeasureCantileverNeckOverlap(List<CantileverRun>[] runsByColumn, CantileverRun run, int neighborColumn)
-        {
-            if (neighborColumn < 0 || neighborColumn >= runsByColumn.Length)
-            {
-                return 0;
-            }
-
-            var overlap = 0;
-            foreach (var neighbor in runsByColumn[neighborColumn])
-            {
-                if (neighbor.Hops != 0)
-                {
-                    continue;
-                }
-
-                var start = Mathf.Max(run.VerticalStart, neighbor.VerticalStart);
-                var end = Mathf.Min(run.VerticalEnd, neighbor.VerticalEnd);
-                if (end >= start)
-                {
-                    overlap += end - start + 1;
-                }
-            }
-
-            return overlap;
-        }
-
-        private static bool CantileverComponentShouldFall(
+        private static List<CantileverRun> SelectCantileverFailingRuns(
             List<CantileverRun>[] runsByColumn,
             List<CantileverRun> component,
             UnsupportedIslandScanGrid grid,
             bool upIsU,
             int topVerticalIndex)
         {
+            var failing = new List<CantileverRun>();
             var horizontalStep = CantileverHorizontalStep(grid, upIsU);
-            var verticalStep = CantileverVerticalStep(grid, upIsU);
-            var maxHops = 0;
             var disconnected = false;
             var touchesTopEdge = false;
-            var neckThickness = 0f;
+            var seeds = new List<CantileverRun>();
             foreach (var run in component)
             {
                 if (run.Hops == int.MaxValue)
@@ -1756,33 +1734,84 @@ namespace ArenaShooter
                     {
                         touchesTopEdge = true;
                     }
-                }
-                else
-                {
-                    maxHops = Mathf.Max(maxHops, run.Hops);
+
+                    continue;
                 }
 
-                if (run.Hops != 1)
+                var reach = run.Hops * horizontalStep;
+                if (reach < CantileverMinimumOverhangReach)
                 {
                     continue;
                 }
 
-                neckThickness += MeasureCantileverNeckOverlap(runsByColumn, run, run.HorizontalIndex - 1) * verticalStep;
-                neckThickness += MeasureCantileverNeckOverlap(runsByColumn, run, run.HorizontalIndex + 1) * verticalStep;
+                if (reach > CantileverSlendernessLimit * Mathf.Max(run.Bottleneck, CantileverMinimumNeckThickness))
+                {
+                    seeds.Add(run);
+                }
             }
 
             if (disconnected)
             {
-                return touchesTopEdge;
+                if (touchesTopEdge)
+                {
+                    failing.AddRange(component);
+                }
+
+                return failing;
             }
 
-            var reach = maxHops * horizontalStep;
-            if (reach < CantileverMinimumOverhangReach)
+            if (seeds.Count == 0)
             {
-                return false;
+                return failing;
             }
 
-            return reach > CantileverSlendernessLimit * Mathf.Max(neckThickness, CantileverMinimumNeckThickness);
+            var failingSet = new HashSet<CantileverRun>(seeds);
+            var queue = new Queue<CantileverRun>(seeds);
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                QueueDownstreamCantileverRuns(runsByColumn, current, current.HorizontalIndex - 1, failingSet, queue);
+                QueueDownstreamCantileverRuns(runsByColumn, current, current.HorizontalIndex + 1, failingSet, queue);
+            }
+
+            foreach (var run in component)
+            {
+                if (failingSet.Contains(run))
+                {
+                    failing.Add(run);
+                }
+            }
+
+            return failing;
+        }
+
+        private static void QueueDownstreamCantileverRuns(
+            List<CantileverRun>[] runsByColumn,
+            CantileverRun current,
+            int neighborColumn,
+            HashSet<CantileverRun> failingSet,
+            Queue<CantileverRun> queue)
+        {
+            if (neighborColumn < 0 || neighborColumn >= runsByColumn.Length)
+            {
+                return;
+            }
+
+            foreach (var neighbor in runsByColumn[neighborColumn])
+            {
+                if (neighbor.Hops == 0 ||
+                    neighbor.Hops == int.MaxValue ||
+                    neighbor.Hops < current.Hops ||
+                    failingSet.Contains(neighbor) ||
+                    neighbor.VerticalStart > current.VerticalEnd ||
+                    neighbor.VerticalEnd < current.VerticalStart)
+                {
+                    continue;
+                }
+
+                failingSet.Add(neighbor);
+                queue.Enqueue(neighbor);
+            }
         }
 
         private static List<int> CollectCantileverComponentCells(
@@ -1841,19 +1870,20 @@ namespace ArenaShooter
                 }
 
                 var runsByColumn = BuildCantileverRuns(grid, upIsU, upSign);
-                ComputeCantileverHops(runsByColumn);
+                ComputeCantileverHops(runsByColumn, CantileverVerticalStep(grid, upIsU));
                 var components = GatherCantileverOverhangComponents(runsByColumn);
                 var topVerticalIndex = upSign > 0f ? CantileverVerticalCount(grid, upIsU) - 1 : 0;
                 var removedAny = false;
                 var componentMask = new bool[grid.Count];
                 foreach (var component in components)
                 {
-                    if (!CantileverComponentShouldFall(runsByColumn, component, grid, upIsU, topVerticalIndex))
+                    var failingRuns = SelectCantileverFailingRuns(runsByColumn, component, grid, upIsU, topVerticalIndex);
+                    if (failingRuns.Count == 0)
                     {
                         continue;
                     }
 
-                    var cells = CollectCantileverComponentCells(grid, upIsU, component, componentMask);
+                    var cells = CollectCantileverComponentCells(grid, upIsU, failingRuns, componentMask);
                     if (!TryCreateUnsupportedIslandFromCells(grid, cells, componentMask, out var island))
                     {
                         ClearCantileverComponentMask(componentMask, cells);

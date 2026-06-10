@@ -58,7 +58,7 @@ public sealed class DestructibleArenaPieceCantileverTests
     }
 
     [Test]
-    public void LongThinSideSpikeFalls()
+    public void LongThinSideSpikeBreaksOffBeyondSupportableStub()
     {
         AddRectStamp(-5f, 5f, 0.4f, 3f);
         AddRectStamp(-5f, 5f, -3f, -0.4f);
@@ -66,7 +66,25 @@ public sealed class DestructibleArenaPieceCantileverTests
 
         InvokeRemoveUnsupportedWallIslands();
 
-        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-3.5f, 0f)), Is.True);
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-2.4f, 0f)), Is.True);
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-4.5f, 0f)), Is.False);
+        Assert.That(CountHiddenCleanupStamps(), Is.GreaterThanOrEqualTo(1));
+        Assert.That(GameObject.Find("Falling Wall Slab"), Is.Not.Null);
+    }
+
+    [Test]
+    public void LargeBlobAttachedByNarrowIsthmusFalls()
+    {
+        AddRectStamp(-0.6f, 5f, -3f, 3f);
+        AddRectStamp(-4.2f, -3.2f, 1.3f, 3f);
+        AddRectStamp(-4.2f, -3.2f, -3f, 1.0f);
+        AddRectStamp(-3.2f, -0.6f, 2.4f, 3f);
+        AddRectStamp(-3.2f, -0.6f, -3f, 0.2f);
+
+        InvokeRemoveUnsupportedWallIslands();
+
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-1.9f, 1.3f)), Is.True);
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-4.6f, 0f)), Is.False);
         Assert.That(CountHiddenCleanupStamps(), Is.GreaterThanOrEqualTo(1));
         Assert.That(GameObject.Find("Falling Wall Slab"), Is.Not.Null);
     }

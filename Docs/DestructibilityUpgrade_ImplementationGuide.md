@@ -1249,6 +1249,22 @@ material. Fail when `reach > CantileverSlendernessLimit × neck` (or when a comp
 any anchor at all). Failed components are removed with the existing cleanup-stamp machinery and
 spawn a falling slab + chip spray.
 
+> **Addendum (implemented 2026-06-10, supersedes the code below in three ways):**
+> the as-built version in `DestructibleArenaPiece.cs` refines this design after playtesting:
+> 1. **Chain bottleneck instead of hop-1 neck.** Each run carries
+>    `Bottleneck = min(parent.Bottleneck, interface overlap with parent)` propagated during the
+>    BFS, so a large piece attached by a narrow isthmus *anywhere* along its support path fails
+>    (`reach > limit × bottleneck`), not just pieces narrow right next to the anchor.
+> 2. **Per-run failure + downstream break propagation.** Runs that individually fail seed a BFS
+>    that expands only toward equal-or-higher hop counts; everything beyond the break line falls
+>    and a supportable stub remains, instead of dropping whole components.
+> 3. **Disconnected components fall only if they touch the top edge.** Free-floating islands are
+>    left to the existing island system (preserving its spray-budget deferral semantics).
+> The tests in Step 3.4 were extended accordingly (`LargeBlobAttachedByNarrowIsthmusFalls`,
+> `LongThinSideSpikeBreaksOffBeyondSupportableStub`), and one pre-existing island test assertion
+> was relaxed (`TinyUnsupportedComponentIsCleanedWithoutSpray` now allows extra cleanup stamps,
+> because thin remnant strips legitimately collapse under the new rule).
+
 ### Step 3.1 — Add the cantilever run class
 
 **Anchor:** the closing brace of the nested class `UnsupportedWallIsland` (around line 346).
