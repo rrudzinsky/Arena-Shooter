@@ -1588,9 +1588,7 @@ namespace ArenaShooter
                             VerticalStart = runStart,
                             VerticalEnd = w - 1
                         };
-                        if (h == 0 ||
-                            h == horizontalCount - 1 ||
-                            (bottomVerticalIndex >= runStart && bottomVerticalIndex <= w - 1))
+                        if (bottomVerticalIndex >= runStart && bottomVerticalIndex <= w - 1)
                         {
                             run.Hops = 0;
                         }
@@ -1723,16 +1721,18 @@ namespace ArenaShooter
             var failing = new List<CantileverRun>();
             var horizontalStep = CantileverHorizontalStep(grid, upIsU);
             var disconnected = false;
-            var touchesTopEdge = false;
+            var touchesFreeEdge = false;
             var seeds = new List<CantileverRun>();
             foreach (var run in component)
             {
                 if (run.Hops == int.MaxValue)
                 {
                     disconnected = true;
-                    if (topVerticalIndex >= run.VerticalStart && topVerticalIndex <= run.VerticalEnd)
+                    if ((topVerticalIndex >= run.VerticalStart && topVerticalIndex <= run.VerticalEnd) ||
+                        run.HorizontalIndex == 0 ||
+                        run.HorizontalIndex == runsByColumn.Length - 1)
                     {
-                        touchesTopEdge = true;
+                        touchesFreeEdge = true;
                     }
 
                     continue;
@@ -1752,7 +1752,7 @@ namespace ArenaShooter
 
             if (disconnected)
             {
-                if (touchesTopEdge)
+                if (touchesFreeEdge)
                 {
                     failing.AddRange(component);
                 }
@@ -2330,7 +2330,7 @@ namespace ArenaShooter
             List<UnsupportedWallIsland> islands)
         {
             var thickness = GetContourOwnedWallContourThickness();
-            var rawSegments = BuildClippedVisibleContourSegments(bounds, thickness, false);
+            var rawSegments = BuildClippedVisibleContourSegments(bounds, thickness, false, false);
             if (rawSegments.Count == 0)
             {
                 return;
@@ -2352,7 +2352,7 @@ namespace ArenaShooter
             {
                 var group = groups[i];
                 if (!IsContourShardCandidateGroup(group, supportProbeDistance) ||
-                    ContourGroupTouchesBounds(group, bounds, supportProbeDistance) ||
+                    ContourGroupRestsOnWallFloor(group, bounds, supportProbeDistance) ||
                     IsOpenContourGroupOwnedByUnsupportedIsland(group, rawSegments, islands, supportProbeDistance) ||
                     IsOpenContourGroupAdjacentToSupportedMaterial(group, rawSegments, grid, ownerLabels, coreSupported, supportProbeDistance))
                 {
@@ -2401,6 +2401,32 @@ namespace ArenaShooter
                 group.Max.x >= bounds.MaxU - margin ||
                 group.Min.y <= bounds.MinV + margin ||
                 group.Max.y >= bounds.MaxV - margin;
+        }
+
+        private bool ContourGroupRestsOnWallFloor(ContourSegmentGroup group, DamageComponentPlaneBounds bounds, float margin)
+        {
+            const float boundaryEpsilon = 0.012f;
+            if (ContourGroupTouchesBounds(group, bounds, boundaryEpsilon))
+            {
+                return true;
+            }
+
+            if (!TryGetContourOwnedWallBasis(0f, out _, out var u, out var v, out _, out _) ||
+                !TryGetWallUvUpAxis(u, v, out var upIsU, out var upSign))
+            {
+                return ContourGroupTouchesBounds(group, bounds, margin);
+            }
+
+            if (upIsU)
+            {
+                return upSign > 0f
+                    ? group.Min.x <= bounds.MinU + margin
+                    : group.Max.x >= bounds.MaxU - margin;
+            }
+
+            return upSign > 0f
+                ? group.Min.y <= bounds.MinV + margin
+                : group.Max.y >= bounds.MaxV - margin;
         }
 
         private bool IsOpenContourGroupAdjacentToSupportedMaterial(
@@ -3151,7 +3177,7 @@ namespace ArenaShooter
         {
             var points = CreatePaddedUnsupportedIslandCleanupPoints(sourcePoints);
             CalculatePolygonBounds(points, out var min, out var max);
-            return new DamageStamp
+            var stamp = new DamageStamp
             {
                 Normal = normal,
                 U = u,
@@ -3162,6 +3188,9 @@ namespace ArenaShooter
                 Points = points,
                 RenderContour = false
             };
+            stamp.Opposite = CreateOppositeContourOwnedWallStamp(stamp, normal, halfN);
+            stamp.Opposite.RenderContour = false;
+            return stamp;
         }
 
         private static Vector2[] CreatePaddedUnsupportedIslandCleanupPoints(List<Vector2> sourcePoints)
@@ -3788,9 +3817,10 @@ namespace ArenaShooter
 
             var thickness = GetContourOwnedWallContourThickness();
             var visibleSegments = GetVisibleContourOwnedWallSegments(thickness);
-            if (visibleSegments.Count > 0)
+            var bridgeSegments = GetContourOwnedWallBridgeSegments(thickness);
+            if (bridgeSegments.Count > 0)
             {
-                AddContourInteriorBridge(vertices, bridgeTriangles, visibleSegments);
+                AddContourInteriorBridge(vertices, bridgeTriangles, bridgeSegments);
             }
 
             combinedMeshFilter.sharedMesh = CreateMesh("Combined Destructible Wall Mesh", vertices, new[] { slabTriangles, bridgeTriangles });
@@ -4038,16 +4068,28 @@ namespace ArenaShooter
                 return new List<ContourSegment2D>();
             }
 
-            return BuildClippedVisibleContourSegments(bounds, thickness, true);
+            return BuildClippedVisibleContourSegments(bounds, thickness, true, false);
+        }
+
+        private List<ContourSegment2D> GetContourOwnedWallBridgeSegments(float thickness)
+        {
+            if (wallDamageStamps.Count == 0 ||
+                !TryGetContourOwnedWallBasis(0f, out _, out _, out _, out _, out var bounds))
+            {
+                return new List<ContourSegment2D>();
+            }
+
+            return BuildClippedVisibleContourSegments(bounds, thickness, true, true);
         }
 
         private List<ContourSegment2D> BuildClippedVisibleContourSegments(
             DamageComponentPlaneBounds bounds,
             float thickness,
-            bool removeSmallInteriorIslands)
+            bool removeSmallInteriorIslands,
+            bool includeNonContourOwners)
         {
             var result = new List<ContourSegment2D>();
-            var rawSegments = BuildStampUnionDamageSegments(wallDamageStamps, thickness, false, removeSmallInteriorIslands);
+            var rawSegments = BuildStampUnionDamageSegments(wallDamageStamps, thickness, includeNonContourOwners, removeSmallInteriorIslands);
             for (var i = 0; i < rawSegments.Count; i++)
             {
                 var segment = rawSegments[i];

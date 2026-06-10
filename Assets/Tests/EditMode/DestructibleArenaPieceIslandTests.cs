@@ -85,7 +85,7 @@ public sealed class DestructibleArenaPieceIslandTests
     }
 
     [Test]
-    public void WideBorderStripTouchingOneWallSideRemainsSupported()
+    public void WideBorderStripTouchingOneWallSideFallsUnderGravity()
     {
         SetConfiguredSize(new Vector3(10f, 6f, 0.5f));
         AddWideBorderStripTouchingLeftSide();
@@ -94,7 +94,7 @@ public sealed class DestructibleArenaPieceIslandTests
 
         InvokeRemoveUnsupportedWallIslands();
 
-        Assert.That(CountHiddenCleanupStamps(), Is.Zero);
+        Assert.That(CountHiddenCleanupStamps(), Is.GreaterThanOrEqualTo(1));
     }
 
     [Test]

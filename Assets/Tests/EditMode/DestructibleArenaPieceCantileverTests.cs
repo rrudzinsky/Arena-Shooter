@@ -58,18 +58,54 @@ public sealed class DestructibleArenaPieceCantileverTests
     }
 
     [Test]
-    public void LongThinSideSpikeBreaksOffBeyondSupportableStub()
+    public void LongThinSpikeFromFloorColumnBreaksOffBeyondSupportableStub()
     {
-        AddRectStamp(-5f, 5f, 0.4f, 3f);
-        AddRectStamp(-5f, 5f, -3f, -0.4f);
-        AddRectStamp(-2f, 5f, -0.45f, 0.45f);
+        AddRectStamp(-4.2f, 5f, 0.4f, 3f);
+        AddRectStamp(-4.2f, 5f, -3f, -0.4f);
+        AddRectStamp(-1.2f, 5f, -0.45f, 0.45f);
 
         InvokeRemoveUnsupportedWallIslands();
 
-        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-2.4f, 0f)), Is.True);
-        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-4.5f, 0f)), Is.False);
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-1.5f, 0f)), Is.True);
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(-3f, 0f)), Is.False);
         Assert.That(CountHiddenCleanupStamps(), Is.GreaterThanOrEqualTo(1));
         Assert.That(GameObject.Find("Falling Wall Slab"), Is.Not.Null);
+    }
+
+    [Test]
+    public void CornerPieceAttachedOnlyToSideEdgeFalls()
+    {
+        AddRectStamp(-5f, 3f, -3f, 3f);
+        AddRectStamp(3f, 5f, -3f, 1.5f);
+
+        InvokeRemoveUnsupportedWallIslands();
+
+        Assert.That(IsPointInsideWallDamageUnion(new Vector2(4f, 2.5f)), Is.True);
+        Assert.That(CountHiddenCleanupStamps(), Is.GreaterThanOrEqualTo(1));
+        Assert.That(GameObject.Find("Falling Wall Slab"), Is.Not.Null);
+    }
+
+    [Test]
+    public void OpenShardSliverOnTopBorderIsCleaned()
+    {
+        AddRectStamp(-0.32f, 0.32f, 2.954f, 3.2f);
+        AddRectStamp(-0.32f, 0.32f, 2.6f, 2.946f);
+        AddRectStamp(-0.32f, -0.2f, 2.6f, 3.2f);
+        AddRectStamp(0.2f, 0.32f, 2.6f, 3.2f);
+        AddOpenStamp(new Vector2(-0.2f, 2.95f), new Vector2(0.2f, 2.95f));
+
+        InvokeRemoveUnsupportedWallIslands();
+
+        Assert.That(CountHiddenCleanupStamps(), Is.GreaterThanOrEqualTo(1));
+    }
+
+    [Test]
+    public void HiddenCleanupStampsStillProduceInteriorBridgeFaces()
+    {
+        AddRectStamp(-1f, 1f, -1f, 1f, false);
+
+        Assert.That(GetBridgeSegmentCount(), Is.GreaterThan(0));
+        Assert.That(GetVisibleSegmentCount(), Is.Zero);
     }
 
     [Test]
@@ -130,7 +166,7 @@ public sealed class DestructibleArenaPieceCantileverTests
         Assert.That(FindComponentByTypeName(slab, "FallingWallSlabAnimation"), Is.Not.Null);
     }
 
-    private void AddRectStamp(float minU, float maxU, float minV, float maxV)
+    private void AddRectStamp(float minU, float maxU, float minV, float maxV, bool renderContour = true)
     {
         var points = new[]
         {
@@ -148,8 +184,46 @@ public sealed class DestructibleArenaPieceCantileverTests
         SetStampField(stamp, "Max", new Vector2(maxU, maxV));
         SetStampField(stamp, "Points", points);
         SetStampField(stamp, "RenderClosed", true);
+        SetStampField(stamp, "RenderContour", renderContour);
+        GetStampList().Add(stamp);
+    }
+
+    private void AddOpenStamp(params Vector2[] path)
+    {
+        var points = new Vector2[path.Length + 1];
+        var min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
+        var max = new Vector2(float.NegativeInfinity, float.NegativeInfinity);
+        for (var i = 0; i < path.Length; i++)
+        {
+            points[i] = path[i];
+            min = Vector2.Min(min, path[i]);
+            max = Vector2.Max(max, path[i]);
+        }
+
+        points[points.Length - 1] = path[path.Length - 1];
+        var stamp = System.Activator.CreateInstance(DamageStampType, nonPublic: true);
+        SetStampField(stamp, "Normal", Vector3.forward);
+        SetStampField(stamp, "U", Vector3.right);
+        SetStampField(stamp, "V", Vector3.up);
+        SetStampField(stamp, "Plane", 1f);
+        SetStampField(stamp, "Min", min);
+        SetStampField(stamp, "Max", max);
+        SetStampField(stamp, "Points", points);
+        SetStampField(stamp, "RenderClosed", false);
         SetStampField(stamp, "RenderContour", true);
         GetStampList().Add(stamp);
+    }
+
+    private int GetBridgeSegmentCount()
+    {
+        var method = PieceType.GetMethod("GetContourOwnedWallBridgeSegments", PrivateInstance);
+        return ((ICollection)method.Invoke(piece, new object[] { 0.02f })).Count;
+    }
+
+    private int GetVisibleSegmentCount()
+    {
+        var method = PieceType.GetMethod("GetVisibleContourOwnedWallSegments", PrivateInstance);
+        return ((ICollection)method.Invoke(piece, new object[] { 0.02f })).Count;
     }
 
     private static void SetStampField(object stamp, string name, object value)
