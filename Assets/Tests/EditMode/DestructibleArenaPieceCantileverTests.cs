@@ -203,7 +203,7 @@ public sealed class DestructibleArenaPieceCantileverTests
     }
 
     [Test]
-    public void FallingSlabHasAnimationAndNoPhysics()
+    public void FallingSlabHasPhysicsAndNeonRim()
     {
         AddRectStamp(-4.5f, 4.5f, 0.8f, 2.2f);
 
@@ -211,10 +211,15 @@ public sealed class DestructibleArenaPieceCantileverTests
 
         var slab = GameObject.Find("Falling Wall Slab");
         Assert.That(slab, Is.Not.Null);
-        Assert.That(slab.GetComponent<Rigidbody>(), Is.Null);
-        Assert.That(slab.GetComponent<Collider>(), Is.Null);
+        Assert.That(slab.GetComponent<Rigidbody>(), Is.Not.Null);
+        var slabCollider = slab.GetComponent<MeshCollider>();
+        Assert.That(slabCollider, Is.Not.Null);
+        Assert.That(slabCollider.convex, Is.True);
         Assert.That(slab.GetComponent<MeshFilter>().sharedMesh, Is.Not.Null);
         Assert.That(FindComponentByTypeName(slab, "FallingWallSlabAnimation"), Is.Not.Null);
+        var rim = slab.transform.Find("Falling Wall Slab Rim");
+        Assert.That(rim, Is.Not.Null);
+        Assert.That(rim.GetComponent<MeshFilter>().sharedMesh, Is.Not.Null);
     }
 
     private void AddRectStamp(float minU, float maxU, float minV, float maxV, bool renderContour = true)

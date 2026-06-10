@@ -446,64 +446,20 @@ namespace ArenaShooter
 
         private sealed class FallingWallSlabAnimation : MonoBehaviour
         {
-            private const float Gravity = 14f;
-            private Vector3 velocity;
-            private Vector3 tipAxis;
-            private float tipDegreesPerSecond;
             private float duration;
             private float elapsed;
             private Vector3 startScale;
-            private float groundY;
-            private float restHalfHeight;
-            private bool grounded;
 
-            public void Initialize(
-                Vector3 initialVelocity,
-                Vector3 tipAxisWorld,
-                float tipSpeed,
-                float lifetimeSeconds,
-                float groundLevelY,
-                float groundedHalfHeight)
+            public void Initialize(float lifetimeSeconds)
             {
-                velocity = initialVelocity;
-                tipAxis = tipAxisWorld.sqrMagnitude > 0.0001f ? tipAxisWorld.normalized : Vector3.right;
-                tipDegreesPerSecond = tipSpeed;
                 duration = Mathf.Max(0.1f, lifetimeSeconds);
                 startScale = transform.localScale;
                 elapsed = 0f;
-                groundY = groundLevelY;
-                restHalfHeight = Mathf.Max(0.02f, groundedHalfHeight);
-                grounded = false;
             }
 
             private void Update()
             {
                 elapsed += Time.deltaTime;
-                if (!grounded)
-                {
-                    velocity += Vector3.down * (Gravity * Time.deltaTime);
-                    transform.position += velocity * Time.deltaTime;
-                    transform.Rotate(tipAxis, tipDegreesPerSecond * Time.deltaTime, Space.World);
-                    if (transform.position.y - restHalfHeight <= groundY)
-                    {
-                        transform.position = new Vector3(
-                            transform.position.x,
-                            groundY + restHalfHeight,
-                            transform.position.z);
-                        if (velocity.y < -1.4f)
-                        {
-                            velocity = new Vector3(velocity.x * 0.55f, -velocity.y * 0.28f, velocity.z * 0.55f);
-                            tipDegreesPerSecond *= 0.45f;
-                        }
-                        else
-                        {
-                            velocity = Vector3.zero;
-                            tipDegreesPerSecond = 0f;
-                            grounded = true;
-                        }
-                    }
-                }
-
                 var t = Mathf.Clamp01(elapsed / duration);
                 var shrink = 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.7f, 1f, t));
                 transform.localScale = startScale * Mathf.Max(0.001f, shrink);
@@ -3945,11 +3901,45 @@ namespace ArenaShooter
             }
 
             var mesh = CreateMesh("Falling Wall Slab Mesh", vertices, new[] { triangles });
+            var rimVertices = new List<Vector3>();
+            var rimTriangles = new List<int>();
+            var rimThickness = Mathf.Clamp(halfN * 0.16f, 0.012f, 0.03f);
+            for (var i = 0; i < hull.Count; i++)
+            {
+                var a = hull[i];
+                var b = hull[(i + 1) % hull.Count];
+                if ((b - a).sqrMagnitude <= 0.0000001f)
+                {
+                    continue;
+                }
+
+                AddContourSegment(
+                    rimVertices,
+                    rimTriangles,
+                    SlabPointToMeshLocal(a, centroid, u, v, normal, halfN),
+                    SlabPointToMeshLocal(b, centroid, u, v, normal, halfN),
+                    normal,
+                    rimThickness);
+                AddContourSegment(
+                    rimVertices,
+                    rimTriangles,
+                    SlabPointToMeshLocal(a, centroid, u, v, normal, -halfN),
+                    SlabPointToMeshLocal(b, centroid, u, v, normal, -halfN),
+                    -normal,
+                    rimThickness);
+            }
+
+            var rimMesh = rimVertices.Count == 0
+                ? null
+                : CreateMesh("Falling Wall Slab Rim Mesh", rimVertices, new[] { rimTriangles });
             var seed = CalculateUnsupportedIslandSpraySeed(island, transform.TransformDirection(normal));
             var centerLocal = u * centroid.x + v * centroid.y;
             var drift = transform.TransformDirection(normal) *
                 ((Hash01(seed ^ 0x9c7) > 0.5f ? 1f : -1f) * 0.55f);
-            SpawnFallingDebrisObject(mesh, transform.TransformPoint(centerLocal), transform.rotation, seed, drift);
+            var spawnOffset = drift.sqrMagnitude > 0.0001f
+                ? drift.normalized * (halfN * 2f + 0.03f)
+                : Vector3.zero;
+            SpawnFallingDebrisObject(mesh, rimMesh, transform.TransformPoint(centerLocal), transform.rotation, seed, drift, spawnOffset);
             slabBudget--;
         }
 
@@ -3958,10 +3948,17 @@ namespace ArenaShooter
             return u * (point.x - centroid.x) + v * (point.y - centroid.y) + normal * depth;
         }
 
-        private void SpawnFallingDebrisObject(Mesh mesh, Vector3 worldPosition, Quaternion worldRotation, int seed, Vector3 driftVelocityWorld)
+        private void SpawnFallingDebrisObject(
+            Mesh mesh,
+            Mesh rimMesh,
+            Vector3 worldPosition,
+            Quaternion worldRotation,
+            int seed,
+            Vector3 driftVelocityWorld,
+            Vector3 spawnOffsetWorld)
         {
             var slab = new GameObject("Falling Wall Slab");
-            slab.transform.position = worldPosition;
+            slab.transform.position = worldPosition + spawnOffsetWorld;
             slab.transform.rotation = worldRotation;
             var meshFilter = slab.AddComponent<MeshFilter>();
             meshFilter.sharedMesh = mesh;
@@ -3972,13 +3969,24 @@ namespace ArenaShooter
                 : configuredOutlineCategory;
             DroidRenderSetup.ApplyRenderer(renderer, outlineCategory);
 
-            var groundY = worldPosition.y - 80f;
-            if (Physics.Raycast(worldPosition, Vector3.down, out var groundHit, 120f, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+            if (rimMesh != null)
             {
-                groundY = groundHit.point.y;
+                var rim = new GameObject("Falling Wall Slab Rim");
+                rim.transform.SetParent(slab.transform, false);
+                var rimFilter = rim.AddComponent<MeshFilter>();
+                rimFilter.sharedMesh = rimMesh;
+                var rimRenderer = rim.AddComponent<MeshRenderer>();
+                rimRenderer.sharedMaterial = GetDamageContourMaterial();
+                DroidRenderSetup.ApplyRenderer(rimRenderer, StylizedOutlineCategory.None);
             }
 
-            var restHalfHeight = Mathf.Max(0.02f, mesh.bounds.extents.y * 0.7f);
+            var slabCollider = slab.AddComponent<MeshCollider>();
+            slabCollider.sharedMesh = mesh;
+            slabCollider.convex = true;
+            slabCollider.material = GetFallingDebrisPhysicsMaterial();
+            var body = slab.AddComponent<Rigidbody>();
+            body.mass = 2f;
+            body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             var lateral = new Vector3(
                 Mathf.Lerp(-0.35f, 0.35f, Hash01(seed ^ 0x3d1)),
                 0f,
@@ -3986,13 +3994,27 @@ namespace ArenaShooter
             var tipAxis = Vector3.Cross(Vector3.up, lateral.sqrMagnitude > 0.0001f ? lateral.normalized : Vector3.forward);
             var tipSpeed = Mathf.Lerp(18f, FallingSlabMaxTipDegreesPerSecond, Hash01(seed ^ 0x215)) *
                 (Hash01(seed ^ 0x6c2) > 0.5f ? 1f : -1f);
-            slab.AddComponent<FallingWallSlabAnimation>().Initialize(
-                lateral + driftVelocityWorld,
-                tipAxis,
-                tipSpeed,
-                FallingSlabLifetimeSeconds,
-                groundY,
-                restHalfHeight);
+            body.linearVelocity = lateral + driftVelocityWorld;
+            body.angularVelocity = tipAxis * (tipSpeed * Mathf.Deg2Rad);
+            slab.AddComponent<FallingWallSlabAnimation>().Initialize(FallingSlabLifetimeSeconds);
+        }
+
+        private static PhysicsMaterial fallingDebrisPhysicsMaterial;
+
+        private static PhysicsMaterial GetFallingDebrisPhysicsMaterial()
+        {
+            if (fallingDebrisPhysicsMaterial == null)
+            {
+                fallingDebrisPhysicsMaterial = new PhysicsMaterial("Falling Wall Debris")
+                {
+                    bounciness = 0.35f,
+                    dynamicFriction = 0.7f,
+                    staticFriction = 0.7f,
+                    bounceCombine = PhysicsMaterialCombine.Maximum
+                };
+            }
+
+            return fallingDebrisPhysicsMaterial;
         }
 
         private int CalculateUnsupportedIslandSpraySeed(UnsupportedWallIsland island, Vector3 sprayDirectionWorld)
@@ -5408,7 +5430,8 @@ namespace ArenaShooter
 
             var mesh = CreateMesh("Falling Pillar Segment Mesh", vertices, new[] { triangles });
             var centerLocal = new Vector3(chunk.LocalPosition.x, (minY + maxY) * 0.5f, chunk.LocalPosition.z);
-            SpawnFallingDebrisObject(mesh, transform.TransformPoint(centerLocal), transform.rotation, CalculatePillarBiteSeed(chunk, 0), Vector3.zero);
+            var segmentOffset = transform.TransformDirection(Vector3.right) * (chunk.BaseScale.x + 0.05f);
+            SpawnFallingDebrisObject(mesh, null, transform.TransformPoint(centerLocal), transform.rotation, CalculatePillarBiteSeed(chunk, 0), Vector3.zero, segmentOffset);
         }
 
         private List<Vector2> BuildBittenPillarCrossSection(Chunk chunk, float inflate, List<bool> edgeIsCut)
