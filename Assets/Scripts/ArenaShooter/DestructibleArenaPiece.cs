@@ -149,6 +149,8 @@ namespace ArenaShooter
         private DestructibleArenaPiece axisSlabZ;
         private DestructibleArenaPiece structuralFallSibling;
         private bool isPillarRouter;
+        private bool suppressSurvivingColliders;
+        private GameObject survivingColliderRoot;
         private BoxCollider surfaceCollider;
         private Vector3Int chunkCounts;
         private bool initialized;
@@ -577,6 +579,7 @@ namespace ArenaShooter
             slab.transform.SetParent(transform, false);
             var piece = slab.AddComponent<DestructibleArenaPiece>();
             piece.forcedWallNormalLocal = wallNormalLocal;
+            piece.suppressSurvivingColliders = true;
             piece.Configure(maxHealth, sourceSize, intactMaterial, configuredOutlineCategory, DestructibleDamageProfile.Wall, Vector3.zero);
             var slabCollider = slab.GetComponent<BoxCollider>();
             if (slabCollider != null)
@@ -1615,6 +1618,22 @@ namespace ArenaShooter
                 : transform.TransformDirection(-normal);
             var sprayBudget = MaxUnsupportedIslandSpraysPerDamage;
             var slabBudget = MaxFallingSlabsPerDamage;
+            RunUnsupportedIslandCleanupPasses(normal, u, v, halfN, bounds, sprayDirectionWorld, ref sprayBudget, ref slabBudget);
+            RemoveCantileverCollapsedWallSections(hitNormalWorld);
+            RemovePedestalCrushedWallSections(hitNormalWorld);
+            RunUnsupportedIslandCleanupPasses(normal, u, v, halfN, bounds, sprayDirectionWorld, ref sprayBudget, ref slabBudget);
+        }
+
+        private void RunUnsupportedIslandCleanupPasses(
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float halfN,
+            DamageComponentPlaneBounds bounds,
+            Vector3 sprayDirectionWorld,
+            ref int sprayBudget,
+            ref int slabBudget)
+        {
             for (var pass = 0; pass < UnsupportedIslandCleanupPasses; pass++)
             {
                 var islands = FindUnsupportedContourOwnedWallIslands(bounds);
@@ -1655,9 +1674,6 @@ namespace ArenaShooter
                     break;
                 }
             }
-
-            RemoveCantileverCollapsedWallSections(hitNormalWorld);
-            RemovePedestalCrushedWallSections(hitNormalWorld);
         }
 
         private bool TryGetWallUvUpAxis(Vector3 u, Vector3 v, out bool upIsU, out float upSign)
@@ -2814,7 +2830,7 @@ namespace ArenaShooter
 
         private bool ContourGroupRestsOnWallFloor(ContourSegmentGroup group, DamageComponentPlaneBounds bounds, float margin)
         {
-            const float boundaryEpsilon = 0.012f;
+            const float boundaryEpsilon = 0.003f;
             if (ContourGroupTouchesBounds(group, bounds, boundaryEpsilon))
             {
                 return true;
@@ -3077,6 +3093,49 @@ namespace ArenaShooter
                     }
                 }
             }
+        }
+
+        private static void JaggedizePolygonLoop(List<Vector2> points, float amplitude)
+        {
+            if (points == null || points.Count < 3 || amplitude <= 0f)
+            {
+                return;
+            }
+
+            var seed = 0x3a99;
+            for (var i = 0; i < points.Count; i++)
+            {
+                unchecked
+                {
+                    seed = seed * 31 + Mathf.RoundToInt(points[i].x * 73f) + Mathf.RoundToInt(points[i].y * 131f);
+                }
+            }
+
+            var result = new List<Vector2>(points.Count * 3);
+            for (var i = 0; i < points.Count; i++)
+            {
+                var a = points[i];
+                var b = points[(i + 1) % points.Count];
+                result.Add(a);
+                var edge = b - a;
+                var length = edge.magnitude;
+                var pieces = Mathf.Min(6, Mathf.FloorToInt(length / (amplitude * 2.5f)));
+                if (pieces < 2)
+                {
+                    continue;
+                }
+
+                var direction = edge / length;
+                var perpendicular = new Vector2(-direction.y, direction.x);
+                for (var piece = 1; piece < pieces; piece++)
+                {
+                    var offset = Mathf.Lerp(-amplitude, amplitude, Hash01(seed ^ (i * 387) ^ (piece * 5197)));
+                    result.Add(a + edge * (piece / (float)pieces) + perpendicular * offset);
+                }
+            }
+
+            points.Clear();
+            points.AddRange(result);
         }
 
         private static float DistancePointToSegmentSquared(Vector2 point, Vector2 start, Vector2 end)
@@ -3852,44 +3911,58 @@ namespace ArenaShooter
                 return;
             }
 
+            var centroid = island.Centroid;
+            var shape = new List<Vector2>(island.Points);
+            if (CalculateSignedPolygonArea(shape) < 0f)
+            {
+                shape.Reverse();
+            }
+
+            var capTriangles = new List<int>();
+            if (!TryTriangulatePolygon(shape, capTriangles))
+            {
+                shape = hull;
+                capTriangles.Clear();
+                for (var i = 1; i < hull.Count - 1; i++)
+                {
+                    capTriangles.Add(0);
+                    capTriangles.Add(i);
+                    capTriangles.Add(i + 1);
+                }
+            }
+
             var vertices = new List<Vector3>();
             var triangles = new List<int>();
-            var centroid = island.Centroid;
-            for (var i = 1; i < hull.Count - 1; i++)
+            for (var i = 0; i < capTriangles.Count; i += 3)
             {
                 AddTriangleOriented(
                     vertices,
                     triangles,
-                    SlabPointToMeshLocal(hull[0], centroid, u, v, normal, halfN),
-                    SlabPointToMeshLocal(hull[i], centroid, u, v, normal, halfN),
-                    SlabPointToMeshLocal(hull[i + 1], centroid, u, v, normal, halfN),
+                    SlabPointToMeshLocal(shape[capTriangles[i]], centroid, u, v, normal, halfN),
+                    SlabPointToMeshLocal(shape[capTriangles[i + 1]], centroid, u, v, normal, halfN),
+                    SlabPointToMeshLocal(shape[capTriangles[i + 2]], centroid, u, v, normal, halfN),
                     normal);
                 AddTriangleOriented(
                     vertices,
                     triangles,
-                    SlabPointToMeshLocal(hull[0], centroid, u, v, normal, -halfN),
-                    SlabPointToMeshLocal(hull[i], centroid, u, v, normal, -halfN),
-                    SlabPointToMeshLocal(hull[i + 1], centroid, u, v, normal, -halfN),
+                    SlabPointToMeshLocal(shape[capTriangles[i]], centroid, u, v, normal, -halfN),
+                    SlabPointToMeshLocal(shape[capTriangles[i + 1]], centroid, u, v, normal, -halfN),
+                    SlabPointToMeshLocal(shape[capTriangles[i + 2]], centroid, u, v, normal, -halfN),
                     -normal);
             }
 
-            for (var i = 0; i < hull.Count; i++)
+            for (var i = 0; i < shape.Count; i++)
             {
-                var a = hull[i];
-                var b = hull[(i + 1) % hull.Count];
+                var a = shape[i];
+                var b = shape[(i + 1) % shape.Count];
                 var edge = b - a;
                 if (edge.sqrMagnitude <= 0.0000001f)
                 {
                     continue;
                 }
 
-                var outward2D = new Vector2(edge.y, -edge.x);
-                if (Vector2.Dot(outward2D, (a + b) * 0.5f - centroid) < 0f)
-                {
-                    outward2D = -outward2D;
-                }
-
-                var outward = u * outward2D.x + v * outward2D.y;
+                var sideOutward2D = new Vector2(edge.y, -edge.x);
+                var sideOutward = u * sideOutward2D.x + v * sideOutward2D.y;
                 AddQuadOriented(
                     vertices,
                     triangles,
@@ -3897,17 +3970,38 @@ namespace ArenaShooter
                     SlabPointToMeshLocal(b, centroid, u, v, normal, halfN),
                     SlabPointToMeshLocal(b, centroid, u, v, normal, -halfN),
                     SlabPointToMeshLocal(a, centroid, u, v, normal, -halfN),
-                    outward);
+                    sideOutward);
             }
 
+            var colliderVertices = new List<Vector3>();
+            var colliderTriangles = new List<int>();
+            for (var i = 1; i < hull.Count - 1; i++)
+            {
+                AddTriangleOriented(
+                    colliderVertices,
+                    colliderTriangles,
+                    SlabPointToMeshLocal(hull[0], centroid, u, v, normal, halfN),
+                    SlabPointToMeshLocal(hull[i], centroid, u, v, normal, halfN),
+                    SlabPointToMeshLocal(hull[i + 1], centroid, u, v, normal, halfN),
+                    normal);
+                AddTriangleOriented(
+                    colliderVertices,
+                    colliderTriangles,
+                    SlabPointToMeshLocal(hull[0], centroid, u, v, normal, -halfN),
+                    SlabPointToMeshLocal(hull[i], centroid, u, v, normal, -halfN),
+                    SlabPointToMeshLocal(hull[i + 1], centroid, u, v, normal, -halfN),
+                    -normal);
+            }
+
+            var colliderMesh = CreateMesh("Falling Wall Slab Collider Mesh", colliderVertices, new[] { colliderTriangles });
             var mesh = CreateMesh("Falling Wall Slab Mesh", vertices, new[] { triangles });
             var rimVertices = new List<Vector3>();
             var rimTriangles = new List<int>();
             var rimThickness = Mathf.Clamp(halfN * 0.16f, 0.012f, 0.03f);
-            for (var i = 0; i < hull.Count; i++)
+            for (var i = 0; i < shape.Count; i++)
             {
-                var a = hull[i];
-                var b = hull[(i + 1) % hull.Count];
+                var a = shape[i];
+                var b = shape[(i + 1) % shape.Count];
                 if ((b - a).sqrMagnitude <= 0.0000001f)
                 {
                     continue;
@@ -3939,9 +4033,10 @@ namespace ArenaShooter
             var spawnOffset = drift.sqrMagnitude > 0.0001f
                 ? drift.normalized * (halfN * 2f + 0.03f)
                 : Vector3.zero;
-            SpawnFallingDebrisObject(mesh, rimMesh, transform.TransformPoint(centerLocal), transform.rotation, seed, drift, spawnOffset);
+            SpawnFallingDebrisObject(mesh, colliderMesh, rimMesh, transform.TransformPoint(centerLocal), transform.rotation, seed, drift, spawnOffset);
             slabBudget--;
         }
+
 
         private static Vector3 SlabPointToMeshLocal(Vector2 point, Vector2 centroid, Vector3 u, Vector3 v, Vector3 normal, float depth)
         {
@@ -3950,6 +4045,7 @@ namespace ArenaShooter
 
         private void SpawnFallingDebrisObject(
             Mesh mesh,
+            Mesh colliderMesh,
             Mesh rimMesh,
             Vector3 worldPosition,
             Quaternion worldRotation,
@@ -3981,7 +4077,7 @@ namespace ArenaShooter
             }
 
             var slabCollider = slab.AddComponent<MeshCollider>();
-            slabCollider.sharedMesh = mesh;
+            slabCollider.sharedMesh = colliderMesh != null ? colliderMesh : mesh;
             slabCollider.convex = true;
             slabCollider.material = GetFallingDebrisPhysicsMaterial();
             var body = slab.AddComponent<Rigidbody>();
@@ -4356,7 +4452,128 @@ namespace ArenaShooter
 
             RebuildOutlineSourceMesh();
             RebuildContourOwnedWallDamageContourMesh(visibleSegments);
+            RebuildSurvivingColliders();
             UploadWallDamageShaderData();
+        }
+
+        private sealed class SurvivingColliderRun
+        {
+            public int StartColumn;
+            public int EndColumn;
+            public int RowStart;
+            public int RowEnd;
+        }
+
+        private void RebuildSurvivingColliders()
+        {
+            if (suppressSurvivingColliders ||
+                surfaceCollider == null ||
+                wallDamageStamps.Count == 0 ||
+                !TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out var bounds))
+            {
+                return;
+            }
+
+            var grid = BuildUnsupportedIslandScanGrid(bounds);
+            if (grid.Count == 0)
+            {
+                return;
+            }
+
+            if (survivingColliderRoot == null)
+            {
+                survivingColliderRoot = new GameObject("Destructible Wall Colliders");
+                survivingColliderRoot.transform.SetParent(transform, false);
+            }
+
+            var previousColliders = survivingColliderRoot.GetComponents<BoxCollider>();
+            for (var i = 0; i < previousColliders.Length; i++)
+            {
+                if (Application.isPlaying)
+                {
+                    Destroy(previousColliders[i]);
+                }
+                else
+                {
+                    DestroyImmediate(previousColliders[i]);
+                }
+            }
+
+            surfaceCollider.enabled = false;
+            var activeBoxes = new List<SurvivingColliderRun>();
+            var columnRuns = new List<Vector2Int>();
+            for (var x = 0; x <= grid.Columns; x++)
+            {
+                columnRuns.Clear();
+                if (x < grid.Columns)
+                {
+                    var runStart = -1;
+                    for (var y = 0; y <= grid.Rows; y++)
+                    {
+                        var solid = y < grid.Rows && grid.Solid[grid.Index(x, y)];
+                        if (solid && runStart < 0)
+                        {
+                            runStart = y;
+                        }
+                        else if (!solid && runStart >= 0)
+                        {
+                            columnRuns.Add(new Vector2Int(runStart, y - 1));
+                            runStart = -1;
+                        }
+                    }
+                }
+
+                for (var i = activeBoxes.Count - 1; i >= 0; i--)
+                {
+                    var box = activeBoxes[i];
+                    var continued = false;
+                    for (var r = 0; r < columnRuns.Count; r++)
+                    {
+                        if (columnRuns[r].x == box.RowStart && columnRuns[r].y == box.RowEnd)
+                        {
+                            box.EndColumn = x;
+                            columnRuns.RemoveAt(r);
+                            continued = true;
+                            break;
+                        }
+                    }
+
+                    if (!continued)
+                    {
+                        EmitSurvivingBoxCollider(box, grid, bounds, u, v, normal, halfN);
+                        activeBoxes.RemoveAt(i);
+                    }
+                }
+
+                for (var r = 0; r < columnRuns.Count; r++)
+                {
+                    activeBoxes.Add(new SurvivingColliderRun
+                    {
+                        StartColumn = x,
+                        EndColumn = x,
+                        RowStart = columnRuns[r].x,
+                        RowEnd = columnRuns[r].y
+                    });
+                }
+            }
+        }
+
+        private void EmitSurvivingBoxCollider(
+            SurvivingColliderRun run,
+            UnsupportedIslandScanGrid grid,
+            DamageComponentPlaneBounds bounds,
+            Vector3 u,
+            Vector3 v,
+            Vector3 normal,
+            float halfN)
+        {
+            var minU = bounds.MinU + run.StartColumn * grid.StepU;
+            var maxU = bounds.MinU + (run.EndColumn + 1) * grid.StepU;
+            var minV = bounds.MinV + run.RowStart * grid.StepV;
+            var maxV = bounds.MinV + (run.RowEnd + 1) * grid.StepV;
+            var box = survivingColliderRoot.AddComponent<BoxCollider>();
+            box.center = u * ((minU + maxU) * 0.5f) + v * ((minV + maxV) * 0.5f);
+            box.size = AbsVector(u) * (maxU - minU) + AbsVector(v) * (maxV - minV) + AbsVector(normal) * (halfN * 2f);
         }
 
         private void EnsureInteriorBridgeObject()
@@ -5431,7 +5648,7 @@ namespace ArenaShooter
             var mesh = CreateMesh("Falling Pillar Segment Mesh", vertices, new[] { triangles });
             var centerLocal = new Vector3(chunk.LocalPosition.x, (minY + maxY) * 0.5f, chunk.LocalPosition.z);
             var segmentOffset = transform.TransformDirection(Vector3.right) * (chunk.BaseScale.x + 0.05f);
-            SpawnFallingDebrisObject(mesh, null, transform.TransformPoint(centerLocal), transform.rotation, CalculatePillarBiteSeed(chunk, 0), Vector3.zero, segmentOffset);
+            SpawnFallingDebrisObject(mesh, null, null, transform.TransformPoint(centerLocal), transform.rotation, CalculatePillarBiteSeed(chunk, 0), Vector3.zero, segmentOffset);
         }
 
         private List<Vector2> BuildBittenPillarCrossSection(Chunk chunk, float inflate, List<bool> edgeIsCut)

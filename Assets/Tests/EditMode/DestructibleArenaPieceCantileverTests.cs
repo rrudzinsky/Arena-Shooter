@@ -145,6 +145,18 @@ public sealed class DestructibleArenaPieceCantileverTests
     }
 
     [Test]
+    public void DamagedWallBuildsSurvivingCompoundColliders()
+    {
+        ConfigureWall(new Vector3(6f, 4f, 0.5f));
+        InvokeTakeDamage(40f, new Vector3(0f, 0.5f, 0.25f), Vector3.back);
+
+        Assert.That(testObject.GetComponent<BoxCollider>().enabled, Is.False);
+        var colliderRoot = FindChild("Destructible Wall Colliders");
+        Assert.That(colliderRoot, Is.Not.Null);
+        Assert.That(colliderRoot.GetComponents<BoxCollider>().Length, Is.GreaterThan(1));
+    }
+
+    [Test]
     public void WallOutlineSourceMeshReflectsSurvivingMaterialAfterDamage()
     {
         ConfigureWall(new Vector3(6f, 4f, 0.5f));
