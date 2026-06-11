@@ -277,7 +277,14 @@ namespace ArenaShooter
                 }
             }
 
-            var spawnProtectedRooms = BuildArmySpawnProtectedRooms(allowed, totalArmies, gridRadius);
+            // Small hilly battlefields shrink each spawn buffer from a 3x3 block to a
+            // 4-room cross: still cover directly in front of every spawn, but it frees
+            // the cells needed to fit the guaranteed hill count with full wall setbacks
+            // (the room graph always reserves at least three spawn sectors, so a 29-cell
+            // grid with three 3x3 patches left hills nowhere to stand).
+            var spawnProtectedRooms = terrainProfile != null && terrainProfile.IsHillyStyle && gridRadius <= 4
+                ? BuildCompactArmySpawnProtectedRooms(allowed, totalArmies, gridRadius)
+                : BuildArmySpawnProtectedRooms(allowed, totalArmies, gridRadius);
             terrainProfile?.BuildTerrainOnlyHillReservations(allowed, spawnProtectedRooms, totalArmies, gridRadius, spacing, roomSize);
             BuildAllOutWarTerrainAwareRoomSet(layout, allowed, spawnProtectedRooms, random, totalArmies, targetRooms, gridRadius, terrainProfile);
             AddCircularClearingRooms(layout, layout.Rooms, spawnProtectedRooms, random, totalArmies, targetRooms, gridRadius, terrainProfile);
@@ -529,9 +536,14 @@ namespace ArenaShooter
             }
         }
 
+        private static float GetAllOutWarPlayableRadius(int gridRadius, float spacing)
+        {
+            return gridRadius * spacing + Mathf.Max(4f, spacing * 0.35f);
+        }
+
         private static void ConfigureAllOutWarBounds(ArenaLayout layout, int gridRadius, float spacing)
         {
-            var playableRadius = gridRadius * spacing + Mathf.Max(4f, spacing * 0.35f);
+            var playableRadius = GetAllOutWarPlayableRadius(gridRadius, spacing);
             layout.CircularCenter = Vector3.zero;
             layout.CircularRadius = playableRadius;
             layout.DomeRadius = playableRadius;
@@ -634,6 +646,25 @@ namespace ArenaShooter
             }
 
             return footprint.Count > 0 && (terrainProfile == null || terrainProfile.IsClearingFootprintBuildable(footprint));
+        }
+
+        private static HashSet<Vector2Int> BuildCompactArmySpawnProtectedRooms(HashSet<Vector2Int> allowed, int totalArmies, int gridRadius)
+        {
+            var protectedRooms = new HashSet<Vector2Int>();
+            for (var team = 0; team < totalArmies; team++)
+            {
+                var angle = Mathf.PI * 2f * team / Mathf.Max(1, totalArmies);
+                var outward = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+                var tangent = new Vector2(-outward.y, outward.x);
+                var frontRoom = FindNearestAllowedCell(allowed, GetArmySpawnFrontTarget(team, totalArmies, gridRadius));
+                var front = new Vector2(frontRoom.x, frontRoom.y);
+                protectedRooms.Add(frontRoom);
+                protectedRooms.Add(FindNearestAllowedCell(allowed, front - outward));
+                protectedRooms.Add(FindNearestAllowedCell(allowed, front + tangent));
+                protectedRooms.Add(FindNearestAllowedCell(allowed, front - tangent));
+            }
+
+            return protectedRooms;
         }
 
         private static HashSet<Vector2Int> BuildArmySpawnProtectedRooms(HashSet<Vector2Int> allowed, int totalArmies, int gridRadius)
@@ -1953,6 +1984,9 @@ namespace ArenaShooter
             private const int TacticalHillMinimumSupportRooms = 7;
             private const float TacticalHillShoulderSlopeDegrees = 24f;
             private const float TacticalHillCrestEdgeHeightScale = 0.92f;
+            // Max tunnel height (4.85) + hill-cut roof clearance (0.85), so a hill at
+            // this peak can host a hill-cut tunnel at any corridor width.
+            private const float AllOutWarHillCutCapablePeakHeight = 5.75f;
 
             private enum TerrainOnlyHillSizeClass
             {
@@ -1999,6 +2033,7 @@ namespace ArenaShooter
                 return terrainOnlyHillNoBuildCells.Contains(cell);
             }
 
+            public bool IsHillyStyle => mapStyle == AllOutWarMapStyle.Hilly;
             public bool UsesHillyProfile => mapStyle == AllOutWarMapStyle.Hilly || terrainOnlyHillRegions.Count > 0;
             public bool HasTerrainOnlyHills => terrainOnlyHillRegions.Count > 0;
             public int TerrainOnlyHillRegionCount => terrainOnlyHillRegions.Count;
@@ -2042,51 +2077,211 @@ namespace ArenaShooter
                 }
 
                 var candidates = new List<Vector2Int>(eligibleCells);
-                candidates.Sort((a, b) => GetTacticalHillCandidateScore(b, spacing).CompareTo(GetTacticalHillCandidateScore(a, spacing)));
+                var candidateBaseScores = new Dictionary<Vector2Int, float>(candidates.Count);
+                foreach (var cell in candidates)
+                {
+                    candidateBaseScores[cell] = GetTacticalHillCandidateScore(cell, spacing);
+                }
 
                 var hilly = mapStyle == AllOutWarMapStyle.Hilly;
-                var signalThreshold = hilly ? 0.34f : TacticalHillSignalThreshold;
+                // Hilly maps put hills first: place at least the guaranteed count, then
+                // let rooms fill whatever space the hills leave. No Perlin threshold gates
+                // hilly placement (the noise blob is one large contiguous region, so any
+                // threshold herds every accepted hill onto it); the signal still shapes
+                // per-hill height and size class. Randomly generated maps keep their
+                // original single tactical hill on the strongest noise blob.
+                var signalThreshold = hilly ? 0f : TacticalHillSignalThreshold;
+                // 6-10 hills is the SMALLEST battlefield's band; the band scales with
+                // map size (+2 per grid ring, rolling +0..4 within the band per seed) so
+                // bigger hilly maps read as genuinely hill-dominated: grid 5 rolls 10-14,
+                // grid 8 rolls 16-20. Derived from the per-seed terrain offset so the
+                // same match seed always rebuilds the same battlefield.
+                var minimumHills = AllOutWarHillyMinimumTerrainOnlyHills + Mathf.Max(0, gridRadius - 3) * 2;
+                var countJitter = Mathf.Abs(
+                    Mathf.RoundToInt(tacticalHillOffset.x * 12.9f) * 73856093 ^
+                    Mathf.RoundToInt(tacticalHillOffset.y * 7.1f) * 19349663) % 5;
                 var targetHillCount = hilly
-                    ? Mathf.Clamp(AllOutWarHillyMinimumTerrainOnlyHills + eligibleCells.Count / 78, AllOutWarHillyMinimumTerrainOnlyHills, 8)
+                    ? minimumHills + countJitter
                     : Mathf.Clamp(eligibleCells.Count / 78, 0, 1);
-                var acceptedHills = 0;
 
-                for (var i = 0; i < candidates.Count && acceptedHills < targetHillCount; i++)
+                var acceptedHills = RunTerrainOnlyHillPlacementPass(
+                    allowed,
+                    eligibleCells,
+                    protectedCells,
+                    candidates,
+                    candidateBaseScores,
+                    totalArmies,
+                    gridRadius,
+                    signalThreshold,
+                    roomSize,
+                    spacing,
+                    targetHillCount,
+                    0,
+                    false,
+                    true,
+                    false);
+
+                if (hilly && acceptedHills < targetHillCount)
                 {
-                    if (TryReserveTerrainOnlyHillCandidate(
+                    acceptedHills = RunTerrainOnlyHillPlacementPass(
                         allowed,
                         eligibleCells,
                         protectedCells,
-                        candidates[i],
+                        candidates,
+                        candidateBaseScores,
                         totalArmies,
                         gridRadius,
                         signalThreshold,
                         roomSize,
-                        false))
+                        spacing,
+                        targetHillCount,
+                        acceptedHills,
+                        true,
+                        true,
+                        false);
+                }
+
+                if (hilly && acceptedHills < targetHillCount)
+                {
+                    // Tight-packing top-up toward the rolled count: compact hills with
+                    // reduced separation, still honoring army spawn routes — without this
+                    // the count always collapsed to the band minimum on crowded layouts.
+                    acceptedHills = RunTerrainOnlyHillPlacementPass(
+                        allowed,
+                        eligibleCells,
+                        protectedCells,
+                        candidates,
+                        candidateBaseScores,
+                        totalArmies,
+                        gridRadius,
+                        signalThreshold,
+                        roomSize,
+                        spacing,
+                        targetHillCount,
+                        acceptedHills,
+                        true,
+                        true,
+                        true);
+                }
+
+                if (hilly && acceptedHills < minimumHills)
+                {
+                    // Last resort: room-route connectivity is a preference, not a veto.
+                    // Open hill terrain stays walkable (slopes are capped at traversable
+                    // angles), so armies can always cross even where no room corridor
+                    // threads between the hills.
+                    RunTerrainOnlyHillPlacementPass(
+                        allowed,
+                        eligibleCells,
+                        protectedCells,
+                        candidates,
+                        candidateBaseScores,
+                        totalArmies,
+                        gridRadius,
+                        signalThreshold,
+                        roomSize,
+                        spacing,
+                        minimumHills,
+                        acceptedHills,
+                        true,
+                        false,
+                        true);
+                }
+            }
+
+            // Greedy farthest-point placement: every pick blends the per-seed noise/hash
+            // score with the distance to the nearest already-accepted hill, so hills
+            // scatter across the battlefield instead of stacking on the strongest noise
+            // blob (which always read as a clump near the map center). Overlapping
+            // shoulders stay possible — the spread term only reorders candidates, all
+            // acceptance rules live in TryReserveTerrainOnlyHillCandidate.
+            private int RunTerrainOnlyHillPlacementPass(
+                HashSet<Vector2Int> allowed,
+                HashSet<Vector2Int> eligibleCells,
+                HashSet<Vector2Int> protectedCells,
+                List<Vector2Int> candidates,
+                Dictionary<Vector2Int, float> candidateBaseScores,
+                int totalArmies,
+                int gridRadius,
+                float signalThreshold,
+                float roomSize,
+                float spacing,
+                int targetHillCount,
+                int acceptedHills,
+                bool forceMinimumHill,
+                bool requireRoomConnectivity,
+                bool relaxedPacking)
+            {
+                // Saturating the spread bonus at ~55% of the map radius gives Poisson-disk
+                // behavior: candidates beyond that distance from every accepted hill are
+                // all "far enough", so the noise/hash score picks freely among them instead
+                // of marching every hill to the rim.
+                var spreadNormalization = Mathf.Max(1f, gridRadius * spacing * 0.55f);
+                var tried = new HashSet<Vector2Int>();
+                while (acceptedHills < targetHillCount)
+                {
+                    var bestIndex = -1;
+                    var bestScore = float.NegativeInfinity;
+                    for (var i = 0; i < candidates.Count; i++)
+                    {
+                        var cell = candidates[i];
+                        if (tried.Contains(cell))
+                        {
+                            continue;
+                        }
+
+                        var score = candidateBaseScores[cell] * 0.4f +
+                            GetTerrainOnlyHillSpreadScore(cell, spacing, spreadNormalization) * 0.6f;
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            bestIndex = i;
+                        }
+                    }
+
+                    if (bestIndex < 0)
+                    {
+                        break;
+                    }
+
+                    tried.Add(candidates[bestIndex]);
+                    if (ReserveTerrainOnlyHillCandidateCore(
+                        allowed,
+                        eligibleCells,
+                        protectedCells,
+                        candidates[bestIndex],
+                        totalArmies,
+                        gridRadius,
+                        signalThreshold,
+                        roomSize,
+                        forceMinimumHill,
+                        requireRoomConnectivity,
+                        relaxedPacking))
                     {
                         acceptedHills++;
                     }
                 }
 
-                if (hilly && acceptedHills < targetHillCount)
+                return acceptedHills;
+            }
+
+            private float GetTerrainOnlyHillSpreadScore(Vector2Int cell, float spacing, float spreadNormalization)
+            {
+                if (terrainOnlyHillRegions.Count == 0)
                 {
-                    for (var i = 0; i < candidates.Count && acceptedHills < targetHillCount; i++)
-                    {
-                        if (TryReserveTerrainOnlyHillCandidate(
-                            allowed,
-                            eligibleCells,
-                            protectedCells,
-                            candidates[i],
-                            totalArmies,
-                            gridRadius,
-                            signalThreshold,
-                            roomSize,
-                            true))
-                        {
-                            acceptedHills++;
-                        }
-                    }
+                    // Neutral spread for the first hill: its spot is driven purely by the
+                    // noise/hash score, so it lands somewhere different every seed.
+                    return 0.5f;
                 }
+
+                var point = RoomPoint(cell, spacing);
+                var nearest = float.MaxValue;
+                foreach (var region in terrainOnlyHillRegions)
+                {
+                    nearest = Mathf.Min(nearest, Vector2.Distance(point, region.Center));
+                }
+
+                return Mathf.Clamp01(nearest / spreadNormalization);
             }
 
             public void BuildFlatMasks(ArenaLayout layout, float roomSize, float corridorLength, float corridorWidth)
@@ -2438,6 +2633,33 @@ namespace ArenaShooter
                 float roomSize,
                 bool forceMinimumHill)
             {
+                return ReserveTerrainOnlyHillCandidateCore(
+                    allowed,
+                    eligibleCells,
+                    protectedCells,
+                    seed,
+                    totalArmies,
+                    gridRadius,
+                    signalThreshold,
+                    roomSize,
+                    forceMinimumHill,
+                    true,
+                    false);
+            }
+
+            private bool ReserveTerrainOnlyHillCandidateCore(
+                HashSet<Vector2Int> allowed,
+                HashSet<Vector2Int> eligibleCells,
+                HashSet<Vector2Int> protectedCells,
+                Vector2Int seed,
+                int totalArmies,
+                int gridRadius,
+                float signalThreshold,
+                float roomSize,
+                bool forceMinimumHill,
+                bool requireRoomConnectivity,
+                bool relaxedPacking)
+            {
                 var signal = SampleTacticalHillSignal(RoomPoint(seed, cellSpacing));
                 if (!forceMinimumHill && signal < signalThreshold)
                 {
@@ -2445,35 +2667,88 @@ namespace ArenaShooter
                 }
 
                 var peakHeight = CalculateTacticalHillPeakHeight(allowed.Count, signal, signalThreshold, forceMinimumHill);
+                if (mapStyle == AllOutWarMapStyle.Hilly && !HasTunnelCapableTerrainOnlyHill())
+                {
+                    // Every hilly battlefield keeps at least one hill tall enough to host
+                    // a hill-cut tunnel (max tunnel height 4.85 plus 0.85 roof clearance);
+                    // small maps otherwise scale every peak below that bar.
+                    peakHeight = Mathf.Clamp(Mathf.Max(peakHeight, AllOutWarHillCutCapablePeakHeight), TacticalHillMinimumHeight, TacticalHillMaximumHeight);
+                }
+                else if (mapStyle == AllOutWarMapStyle.Hilly && gridRadius <= 3)
+                {
+                    // The smallest grid's cells are 16 apart: only low mounds keep
+                    // outer radius + half room + gap under one cell spacing, which is
+                    // what lets six hills stand beside the spawn buffers at all. The
+                    // single tall tunnel hill above is the exception and grabs the
+                    // open center instead.
+                    peakHeight = Mathf.Min(peakHeight, 3.8f);
+                }
+
                 var center = RoomPoint(seed, cellSpacing);
-                var sizeClass = ChooseTerrainOnlyHillSizeClass(seed, signal, forceMinimumHill);
+                var sizeClass = ChooseTerrainOnlyHillSizeClass(seed, signal, forceMinimumHill, relaxedPacking);
                 var region = CreateTerrainOnlyHillRegion(center, peakHeight, roomSize, sizeClass, gridRadius);
-                if (!HasTerrainOnlyHillCoreSeparation(region))
+                if (!HasTerrainOnlyHillCoreSeparation(region, relaxedPacking))
                 {
                     return false;
                 }
 
-                if (center.magnitude + region.OuterRadius > gridRadius * cellSpacing - roomSize * 0.5f)
+                if (mapStyle == AllOutWarMapStyle.Hilly)
                 {
+                    // Hilly hills go anywhere: the dome boundary simply clips a shoulder
+                    // that runs past it, so peaks can sit right out by the wall. Only the
+                    // army spawn arcs are off limits.
+                    if (OverlapsAllOutWarSpawnArc(region.Center, region.OuterRadius, totalArmies, gridRadius))
+                    {
+                        return false;
+                    }
+                }
+                else if (center.magnitude + region.OuterRadius > GetAllOutWarPlayableRadius(gridRadius, cellSpacing) - 1.2f)
+                {
+                    // The single randomly-generated tactical hill keeps its full footprint
+                    // inside the dome wall.
                     return false;
                 }
 
-                var crestCells = BuildTerrainOnlyHillRegionCells(eligibleCells, region.Center, region.CrestRadius + cellSpacing * 0.55f);
-                var actualHillCells = BuildTerrainOnlyHillRegionCells(eligibleCells, region.Center, region.NoStructureRadius);
-                if (crestCells.Count < GetScaledTacticalHillMinimumPlateauRooms(gridRadius) ||
-                    actualHillCells.Count < GetScaledTacticalHillMinimumSupportRooms(gridRadius))
+                // The plateau/support room-count minimums are a room requirement, not a
+                // hill requirement — hilly maps skip them entirely so hills can claim
+                // sparse-cell spots (rim bands, side pockets) and rooms simply spawn
+                // wherever the hills are not. The single randomly-generated tactical
+                // hill keeps them: it exists to host rooftop fights over room terrain.
+                if (mapStyle != AllOutWarMapStyle.Hilly)
                 {
-                    return false;
+                    var crestCells = BuildTerrainOnlyHillRegionCells(eligibleCells, region.Center, region.CrestRadius + cellSpacing * 0.55f);
+                    var actualHillCells = BuildTerrainOnlyHillRegionCells(eligibleCells, region.Center, region.NoStructureRadius);
+                    if (crestCells.Count < GetScaledTacticalHillMinimumPlateauRooms(gridRadius) ||
+                        actualHillCells.Count < GetScaledTacticalHillMinimumSupportRooms(gridRadius))
+                    {
+                        return false;
+                    }
                 }
 
-                var hardNoStructureCells = BuildTerrainOnlyHillRegionCells(allowed, region.Center, region.NoStructureRadius);
+                // Cells are culled by center distance, but a surviving cell's room walls
+                // (and doorways) reach roomSize * 0.5 back toward the hill — without this
+                // reach in the cull radius, doorways open directly onto the shoulder base.
+                // Hilly maps apply the full reach on EVERY battlefield size: the setback
+                // always wins, and the smallest grids pay for it with a lower guaranteed
+                // hill count instead. Non-hilly small maps keep the legacy cull for their
+                // single tactical hill.
+                var structureReach = mapStyle != AllOutWarMapStyle.Hilly && gridRadius <= 4 ? 0f : roomSize * 0.5f;
+                var hardNoStructureCells = BuildTerrainOnlyHillRegionCells(allowed, region.Center, region.NoStructureRadius + structureReach);
+                // Spawn-protected cells become force-built buffer rooms, so they need
+                // genuine wall clearance from the skirt: half a room plus a walkable gap
+                // — the full setback once space allows, a tighter floor on small grids.
+                // (Checking the full room-setback ring instead strangled small
+                // high-army-count maps down to a single center hill, while a near-zero
+                // margin put hill slopes inside spawn room walls.)
+                var spawnFootprintMargin = roomSize * 0.5f + (gridRadius <= 3 ? 0.5f : gridRadius <= 4 ? 2.5f : 8f);
+                var terrainFootprintCells = BuildTerrainOnlyHillRegionCells(allowed, region.Center, region.OuterRadius + spawnFootprintMargin);
                 if (hardNoStructureCells.Count == 0 ||
-                    OverlapsTerrainOnlyHillCells(hardNoStructureCells, protectedCells))
+                    OverlapsTerrainOnlyHillCells(terrainFootprintCells, protectedCells))
                 {
                     return false;
                 }
 
-                var optionalSpacingCells = BuildTerrainOnlyHillRegionCells(allowed, region.Center, region.SpacingRadius);
+                var optionalSpacingCells = BuildTerrainOnlyHillRegionCells(allowed, region.Center, region.SpacingRadius + structureReach);
                 optionalSpacingCells.ExceptWith(hardNoStructureCells);
                 optionalSpacingCells.ExceptWith(protectedCells);
                 optionalSpacingCells.ExceptWith(terrainOnlyHillHardCells);
@@ -2489,7 +2764,16 @@ namespace ArenaShooter
                         gridRadius,
                         out candidateNoBuildCells))
                 {
-                    return false;
+                    if (requireRoomConnectivity)
+                    {
+                        return false;
+                    }
+
+                    // Guarantee pass: the hill wins over room routes. Keep only its hard
+                    // footprint cells so rooms reclaim every optional spacing cell they
+                    // can; armies cross the open (walkable) hill terrain where no room
+                    // corridor fits.
+                    candidateNoBuildCells = new HashSet<Vector2Int>(hardNoStructureCells);
                 }
 
                 terrainOnlyHillRegions.Add(region);
@@ -2506,11 +2790,47 @@ namespace ArenaShooter
                 return true;
             }
 
-            private bool HasTerrainOnlyHillCoreSeparation(TerrainOnlyHillRegion candidate)
+            private bool HasTunnelCapableTerrainOnlyHill()
+            {
+                foreach (var region in terrainOnlyHillRegions)
+                {
+                    if (region.PeakHeight >= AllOutWarHillCutCapablePeakHeight)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            private bool OverlapsAllOutWarSpawnArc(Vector2 center, float outerRadius, int totalArmies, int gridRadius)
+            {
+                // Mirrors ConfigureAllOutWarBounds/AddArmySpawnRegions: each army's arc is
+                // anchored on the perimeter ring at its team angle. A hill may shoulder up
+                // to the arc but never reach into it.
+                var spawnRadius = Mathf.Max(cellSpacing, GetAllOutWarPlayableRadius(gridRadius, cellSpacing) - 2.2f);
+                // Only the arc itself must stay off the hill terrain — the spawn flat
+                // masks already level any skirt that brushes close. A near-cell-sized
+                // clearance here walled off the whole rim on small high-army maps.
+                var arcClearance = 4f;
+                for (var team = 0; team < totalArmies; team++)
+                {
+                    var angle = Mathf.PI * 2f * team / Mathf.Max(1, totalArmies);
+                    var spawnAnchor = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * spawnRadius;
+                    if (Vector2.Distance(center, spawnAnchor) < outerRadius + arcClearance)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            private bool HasTerrainOnlyHillCoreSeparation(TerrainOnlyHillRegion candidate, bool relaxedPacking)
             {
                 foreach (var existing in terrainOnlyHillRegions)
                 {
-                    var minDistance = GetTerrainOnlyHillCoreSeparationRadius(existing) + GetTerrainOnlyHillCoreSeparationRadius(candidate);
+                    var minDistance = GetTerrainOnlyHillCoreSeparationRadius(existing, relaxedPacking) + GetTerrainOnlyHillCoreSeparationRadius(candidate, relaxedPacking);
                     if (Vector2.Distance(existing.Center, candidate.Center) < minDistance)
                     {
                         return false;
@@ -2520,27 +2840,37 @@ namespace ArenaShooter
                 return true;
             }
 
-            private float GetTerrainOnlyHillCoreSeparationRadius(TerrainOnlyHillRegion region)
+            private float GetTerrainOnlyHillCoreSeparationRadius(TerrainOnlyHillRegion region, bool relaxedPacking)
             {
                 // Small battlefields cannot afford the full big-map spread between hills:
                 // neighboring-cell hills with overlapping shoulders are explicitly allowed
-                // there, otherwise six hills can never pack onto the smallest grid.
-                var paddingScale = reservationGridRadius <= 4 ? 0.42f : 1f;
+                // there, otherwise six hills can never pack onto the smallest grid. The
+                // guarantee pass uses the same tight packing on any size map — reaching
+                // the minimum hill count outranks keeping hills apart.
+                var paddingScale = relaxedPacking || reservationGridRadius <= 4 ? 0.42f : 1f;
                 var corePadding = Mathf.Max(cellSpacing * 0.35f * paddingScale, region.CrestRadius * 0.18f);
                 return Mathf.Min(region.OuterRadius, region.CrestRadius + corePadding);
             }
 
-            private TerrainOnlyHillSizeClass ChooseTerrainOnlyHillSizeClass(Vector2Int seed, float signal, bool forceMinimumHill)
+            private TerrainOnlyHillSizeClass ChooseTerrainOnlyHillSizeClass(Vector2Int seed, float signal, bool forceMinimumHill, bool relaxedPacking)
             {
-                if (reservationGridRadius <= 4)
+                if (relaxedPacking || reservationGridRadius <= 3)
                 {
-                    // Only compact hills fit a small battlefield three times over.
+                    // Only compact hills fit the smallest battlefield (or a guarantee-pass
+                    // top-up on a crowded map) without starving everything around them.
                     return TerrainOnlyHillSizeClass.Compact;
                 }
 
                 if (mapStyle != AllOutWarMapStyle.Hilly)
                 {
-                    return TerrainOnlyHillSizeClass.Large;
+                    return reservationGridRadius <= 4 ? TerrainOnlyHillSizeClass.Compact : TerrainOnlyHillSizeClass.Large;
+                }
+
+                if (reservationGridRadius == 4)
+                {
+                    // Grid-4 battlefields fit the occasional medium mound, never a large.
+                    var smallMapHash = Mathf.Abs(seed.x * 73856093 ^ seed.y * 19349663 ^ terrainOnlyHillRegions.Count * 83492791);
+                    return smallMapHash % 100 < 65 ? TerrainOnlyHillSizeClass.Compact : TerrainOnlyHillSizeClass.Medium;
                 }
 
                 var largeCount = 0;
@@ -2586,15 +2916,17 @@ namespace ArenaShooter
                 var crestRoomScale = hilly
                     ? sizeClass == TerrainOnlyHillSizeClass.Compact ? 0.95f : sizeClass == TerrainOnlyHillSizeClass.Medium ? 1.05f : 1.1f
                     : 1.1f;
-                var shoulderSpacingScale = hilly
-                    ? sizeClass == TerrainOnlyHillSizeClass.Compact ? 0.85f : sizeClass == TerrainOnlyHillSizeClass.Medium ? 1.05f : 1.45f
-                    : 1.25f;
                 var shoulderSlopeDegrees = hilly
                     ? sizeClass == TerrainOnlyHillSizeClass.Compact ? 34f : sizeClass == TerrainOnlyHillSizeClass.Medium ? 30f : TacticalHillShoulderSlopeDegrees
                     : TacticalHillShoulderSlopeDegrees;
+                // The room footprint's half-room reach is added separately at cull time
+                // (see structureReach in ReserveTerrainOnlyHillCandidateCore), so this
+                // padding is the genuine guaranteed walkable gap between a doorway and
+                // the shoulder base — roughly a full room width on hilly maps. Rooms are
+                // filler on hilly maps; the setback wins over room count.
                 var noStructurePadding = hilly
-                    ? sizeClass == TerrainOnlyHillSizeClass.Compact ? roomSize * 0.18f : sizeClass == TerrainOnlyHillSizeClass.Medium ? roomSize * 0.32f : roomSize * 0.5f
-                    : roomSize * 0.5f;
+                    ? sizeClass == TerrainOnlyHillSizeClass.Compact ? roomSize * 0.8f : sizeClass == TerrainOnlyHillSizeClass.Medium ? roomSize * 0.9f : roomSize * 1f
+                    : roomSize * 0.6f;
                 var spacingPadding = hilly
                     ? sizeClass == TerrainOnlyHillSizeClass.Compact ? Mathf.Max(roomSize * 0.18f, cellSpacing * 0.12f) :
                         sizeClass == TerrainOnlyHillSizeClass.Medium ? Mathf.Max(roomSize * 0.28f, cellSpacing * 0.20f) :
@@ -2626,12 +2958,31 @@ namespace ArenaShooter
                 }
 
                 var crestRadius = Mathf.Max(roomSize * crestRoomScale, cellSpacing * crestSpacingScale) * sizeScale;
+                if (hilly && gridRadius <= 3)
+                {
+                    // Tight crests pair with the smallest grid's low mounds (see the
+                    // peak cap in ReserveTerrainOnlyHillCandidateCore) so six hills can
+                    // coexist with three spawn buffers on a 29-cell map.
+                    crestRadius = Mathf.Min(crestRadius, roomSize * 0.4f);
+                }
+                // Slope-derived only — the old spacing-based minimum inflated shoulders
+                // far past what traversability needs, sprawling every footprint. The run
+                // matches the truncated skirt in SampleHeight (80% half-period,
+                // renormalized by 1 - 0.0955), so the configured slope cap holds exactly
+                // and the hill ends where the skirt actually reaches the ground.
+                var crestEdgeHeight = peakHeight * TacticalHillCrestEdgeHeightScale;
                 var shoulderRun = Mathf.Max(
-                    cellSpacing * shoulderSpacingScale * sizeScale,
-                    peakHeight * Mathf.PI / (2f * Mathf.Tan(shoulderSlopeDegrees * Mathf.Deg2Rad)));
+                    2.5f,
+                    crestEdgeHeight * Mathf.PI * 0.8f / (2f * Mathf.Tan(shoulderSlopeDegrees * Mathf.Deg2Rad) * (1f - 0.0955f)));
                 var outerRadius = crestRadius + shoulderRun;
-                var noStructureRadius = outerRadius + noStructurePadding * sizeScale;
-                if (gridRadius <= 4)
+                // The walkable gap between a wall and the shoulder base is constant —
+                // scaling it down with the battlefield made smallest-map rooms hug the
+                // hills even though everything else was sized correctly.
+                var noStructureRadius = outerRadius + noStructurePadding;
+                // Hilly maps never cap the room setback — the smallest battlefields keep
+                // the full clearance and accept fewer guaranteed hills instead. Non-hilly
+                // small maps keep the legacy cap for their single tactical hill.
+                if (!hilly && gridRadius <= 4)
                 {
                     noStructureRadius = Mathf.Min(noStructureRadius, cellSpacing * 0.97f);
                 }
@@ -3120,7 +3471,7 @@ namespace ArenaShooter
                     room.x * 73856093 ^
                     room.y * 19349663 ^
                     Mathf.RoundToInt(tacticalHillOffset.x * 17f + tacticalHillOffset.y * 29f) * 83492791);
-                return signal * 0.62f + (hash % 1000) / 1000f * 0.38f;
+                return signal * 0.5f + (hash % 1000) / 1000f * 0.5f;
             }
 
             private float SampleTacticalHillSignal(Vector2 point)
@@ -3652,7 +4003,7 @@ namespace ArenaShooter
             {
                 var distance = Vector2.Distance(first.Center, second.Center);
                 return distance < first.OuterRadius + second.OuterRadius &&
-                    distance > GetTerrainOnlyHillCoreSeparationRadius(first) + GetTerrainOnlyHillCoreSeparationRadius(second);
+                    distance > GetTerrainOnlyHillCoreSeparationRadius(first, false) + GetTerrainOnlyHillCoreSeparationRadius(second, false);
             }
 
             private bool IsPointInsideTerrainOnlyHillUnion(Vector2 point, float insideMargin)
@@ -3939,8 +4290,14 @@ namespace ArenaShooter
                         return Mathf.Lerp(PeakHeight, crestEdgeHeight, crestT);
                     }
 
+                    // The cosine skirt is cut at 80% of its half-period: past that point
+                    // the residual slope is so shallow it reads as an endless apron that
+                    // blocks rooms while looking flat. Renormalizing makes the hill land
+                    // on flat ground with a finite toe gradient instead of tapering
+                    // forever.
                     var shoulderT = Mathf.Clamp01((distance - directionalCrest) / shoulderRun);
-                    var shoulder = Mathf.Cos(shoulderT * Mathf.PI) * 0.5f + 0.5f;
+                    var rawShoulder = Mathf.Cos(shoulderT * Mathf.PI * 0.8f) * 0.5f + 0.5f;
+                    var shoulder = Mathf.Max(0f, (rawShoulder - 0.0955f) / (1f - 0.0955f));
                     return crestEdgeHeight * shoulder;
                 }
             }

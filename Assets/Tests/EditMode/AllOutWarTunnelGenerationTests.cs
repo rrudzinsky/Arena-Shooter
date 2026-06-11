@@ -945,14 +945,14 @@ public sealed class AllOutWarTunnelGenerationTests
         {
             var terrainProfile = BuildHillyTerrainProfileForReservations(seed, 8, 4, out _);
             var count = GetTerrainOnlyHillRegionCount(terrainProfile);
-            Assert.That(count, Is.InRange(6, 8));
+            Assert.That(count, Is.InRange(12, 20));
             for (var i = 0; i < count; i++)
             {
                 var region = ReadTerrainOnlyHillRegion(terrainProfile, i);
                 classes.Add(region.SizeClass);
                 Assert.That(region.PeakHeight, Is.GreaterThanOrEqualTo(4.5f));
                 Assert.That(region.CrestRadius, Is.GreaterThanOrEqualTo(RoomSize * 0.9f));
-                Assert.That(region.OuterRadius - region.CrestRadius, Is.GreaterThanOrEqualTo(RoomSize * 1.1f));
+                Assert.That(region.OuterRadius - region.CrestRadius, Is.GreaterThanOrEqualTo(region.PeakHeight * 1.4f));
                 if (region.SizeClass == "Large")
                 {
                     large.Add(region);
