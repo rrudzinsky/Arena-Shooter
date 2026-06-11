@@ -945,7 +945,7 @@ public sealed class AllOutWarTunnelGenerationTests
         {
             var terrainProfile = BuildHillyTerrainProfileForReservations(seed, 8, 4, out _);
             var count = GetTerrainOnlyHillRegionCount(terrainProfile);
-            Assert.That(count, Is.InRange(3, 5));
+            Assert.That(count, Is.InRange(6, 8));
             for (var i = 0; i < count; i++)
             {
                 var region = ReadTerrainOnlyHillRegion(terrainProfile, i);
@@ -968,6 +968,26 @@ public sealed class AllOutWarTunnelGenerationTests
         Assert.That(compactOrMedium.Count, Is.GreaterThan(0));
         Assert.That(large.Count, Is.GreaterThan(0));
         Assert.That(MinNoStructureRadius(compactOrMedium), Is.LessThan(MinNoStructureRadius(large)));
+    }
+
+    [Test]
+    public void HillyTerrainReservationsCreateThreeHillsOnSmallestBattlefield()
+    {
+        for (var seed = 30000; seed < 30006; seed++)
+        {
+            var terrainProfile = BuildHillyTerrainProfileForReservations(seed, 3, 2, out _);
+            var count = GetTerrainOnlyHillRegionCount(terrainProfile);
+            Assert.That(count, Is.GreaterThanOrEqualTo(6), $"seed {seed}");
+            for (var i = 0; i < count; i++)
+            {
+                var region = ReadTerrainOnlyHillRegion(terrainProfile, i);
+                Assert.That(region.PeakHeight, Is.GreaterThan(3f), $"seed {seed} hill {i}");
+                Assert.That(
+                    region.OuterRadius - region.CrestRadius,
+                    Is.GreaterThan(region.PeakHeight * 1.4f),
+                    $"seed {seed} hill {i} shoulder slope");
+            }
+        }
     }
 
     [Test]
@@ -1789,12 +1809,21 @@ public sealed class AllOutWarTunnelGenerationTests
                 new object[] { allowed, new HashSet<Vector2Int>(), 4, gridRadius, spacing, RoomSize });
             if ((bool)AllOutWarTerrainProfileType.GetProperty("HasTerrainOnlyHills", PublicInstance).GetValue(terrainProfile))
             {
+                // Dense hilly maps can block a particular hill's approach flats with a
+                // neighboring hill's shoulder; every caller probes hill 0 along the X axis,
+                // so pick a seed whose first hill actually supports that cut.
+                if (!InvokeTryBuildHillCutEndpoint(terrainProfile, 0, Vector3.right, 4.5f, 4f, RoomSize * 0.5f, out _) ||
+                    !InvokeTryBuildHillCutEndpoint(terrainProfile, 0, Vector3.left, 4.5f, 4f, RoomSize * 0.5f, out _))
+                {
+                    continue;
+                }
+
                 region = ReadTerrainOnlyHillRegion(terrainProfile, 0);
                 return terrainProfile;
             }
         }
 
-        Assert.Fail("Expected a hilly terrain profile with at least one terrain-only hill.");
+        Assert.Fail("Expected a hilly terrain profile with an X-axis hill-cut capable first hill.");
         region = default;
         return null;
     }

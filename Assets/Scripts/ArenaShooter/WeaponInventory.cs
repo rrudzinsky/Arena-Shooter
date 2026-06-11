@@ -140,7 +140,7 @@ namespace ArenaShooter
                     if (destructible != null)
                     {
                         var structureDamage = Mathf.Max(currentWeapon.Damage, 32f);
-                        destructible.TakeDamage(structureDamage, hit.point, hit.normal, hit.collider);
+                        destructible.TakeDamage(structureDamage, hit.point, hit.normal, hit.collider, ray.direction);
                     }
                 }
             }
@@ -194,7 +194,25 @@ namespace ArenaShooter
                 {
                     if (destructible.AllowsProjectilePassThrough(hit.point, hit.normal))
                     {
-                        continue;
+                        // The ray entered through an existing hole. It may still strike
+                        // surviving material deeper inside this piece (e.g. the wall of an
+                        // angled tunnel) that the coarse colliders cannot report separately.
+                        if (!destructible.TryGetMaterialHitAlongRay(hit.point, ray.direction, out var materialPoint, out var materialNormal))
+                        {
+                            continue;
+                        }
+
+                        var materialDistance = hit.distance + Vector3.Distance(hit.point, materialPoint);
+                        if (TryFindNearTargetBehindCover(hits, i, materialDistance, out bestHit))
+                        {
+                            return true;
+                        }
+
+                        hit.point = materialPoint;
+                        hit.normal = materialNormal;
+                        hit.distance = materialDistance;
+                        bestHit = hit;
+                        return true;
                     }
 
                     if (TryFindNearTargetBehindCover(hits, i, hit.distance, out bestHit))

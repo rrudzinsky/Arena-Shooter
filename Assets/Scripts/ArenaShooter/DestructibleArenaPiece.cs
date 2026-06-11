@@ -57,6 +57,28 @@ namespace ArenaShooter
         private const float PillarBiteSetbackPerHit = 0.30f;
         private const float PillarBiteMaxSetbackFraction = 0.46f;
         private const float PillarBiteDestroyAreaFraction = 0.30f;
+        private const float MaxWallDamageShearPerDepth = 1.2f;
+        private const int ShearedTunnelBridgeSlices = 4;
+        private const float BridgeSliceArtifactMaxSpan = 0.1f;
+        private const float MinContourSegmentLength = 0.008f;
+        private const float PocketProbePadding = 0.03f;
+        private const float PocketAbsorptionMaxSpan = 0.12f;
+        private const float PillarSeveranceSliverWidth = 0.1f;
+        private const float PillarToppleTipMinDegreesPerSecond = 70f;
+        private const float PillarToppleTipMaxDegreesPerSecond = 110f;
+        private const float PillarToppleKickSpeed = 0.8f;
+        private const float WallDebrisSpawnClearance = 0.02f;
+        private const float WallDebrisShotImpulseMin = 3f;
+        private const float WallDebrisShotImpulseMax = 5f;
+        private const float WallDebrisDislodgeKick = 2.2f;
+        private const float DebrisShatterMinImpactSpeed = 4f;
+        private const int DebrisShatterMinFragments = 10;
+        private const int DebrisShatterMaxFragments = 30;
+        private const float DebrisShatterFragmentLifetime = 1.6f;
+        private const float DebrisImpactGlowLifetime = 0.9f;
+        private static readonly Color DebrisImpactGlowColor = new(1f, 0.42f, 0.08f, 1f);
+        private const float PillarBraceProbeDepth = 0.55f;
+        private const int MaxPillarRouterColliders = 96;
         private const float CantileverSlendernessLimit = 2.6f;
         private const float CantileverMinimumOverhangReach = 0.2f;
         private const float CantileverMinimumNeckThickness = 0.06f;
@@ -117,6 +139,18 @@ namespace ArenaShooter
         private static readonly int WallDamageStampPointsId = Shader.PropertyToID("_WallDamageStampPoints");
         private static readonly int WallDamageStampPointOffsetsId = Shader.PropertyToID("_WallDamageStampPointOffsets");
         private static readonly int WallDamageStampPointCountsId = Shader.PropertyToID("_WallDamageStampPointCounts");
+        private static readonly int WallDamageStampShearsId = Shader.PropertyToID("_WallDamageStampShears");
+        private static readonly int WallDamageNId = Shader.PropertyToID("_WallDamageN");
+        private static readonly int WallDamageU2Id = Shader.PropertyToID("_WallDamageU2");
+        private static readonly int WallDamageV2Id = Shader.PropertyToID("_WallDamageV2");
+        private static readonly int WallDamageN2Id = Shader.PropertyToID("_WallDamageN2");
+        private static readonly Vector3[] PillarBraceProbeDirections =
+        {
+            Vector3.right,
+            Vector3.left,
+            Vector3.forward,
+            Vector3.back
+        };
         private Vector3 configuredSize;
         private Material configuredIntactMaterial;
         private Material intactMaterial;
@@ -128,11 +162,13 @@ namespace ArenaShooter
         private ComputeBuffer wallDamageStampPointsBuffer;
         private ComputeBuffer wallDamageStampPointOffsetsBuffer;
         private ComputeBuffer wallDamageStampPointCountsBuffer;
+        private ComputeBuffer wallDamageStampShearsBuffer;
         private MaterialPropertyBlock wallDamagePropertyBlock;
         private int wallDamageStampBoundsCapacity;
         private int wallDamageStampPointsCapacity;
         private int wallDamageStampPointOffsetsCapacity;
         private int wallDamageStampPointCountsCapacity;
+        private int wallDamageStampShearsCapacity;
         private StylizedOutlineCategory configuredOutlineCategory = StylizedOutlineCategory.None;
         private DestructibleDamageProfile damageProfile = DestructibleDamageProfile.Wall;
         private Vector3 configuredBiteDirectionLocal = Vector3.zero;
@@ -145,13 +181,24 @@ namespace ArenaShooter
         private MeshFilter interiorBridgeMeshFilter;
         private MeshRenderer interiorBridgeRenderer;
         private Vector3 forcedWallNormalLocal = Vector3.zero;
+        private Vector3 lastDamageHitPointWorld;
+        private Vector3 lastDamageShotDirectionWorld;
+        private bool hasLastDamageImpulse;
+        private bool scanStampsHaveShear;
+        private UnsupportedIslandScanGrid cachedScanGrid;
+        private int cachedScanGridStampCount = -1;
+        private int lastPocketAbsorptionStampCount = -1;
+        private int lastSplinterAbsorptionStampCount = -1;
         private DestructibleArenaPiece axisSlabX;
         private DestructibleArenaPiece axisSlabZ;
         private DestructibleArenaPiece structuralFallSibling;
+        private DestructibleArenaPiece pillarRouterPiece;
         private bool isPillarRouter;
+        private bool pillarAxisSlabMode;
         private bool suppressSurvivingColliders;
         private bool applyingMirroredStructuralFall;
         private GameObject survivingColliderRoot;
+        private GameObject pillarColliderRoot;
         private BoxCollider surfaceCollider;
         private Vector3Int chunkCounts;
         private bool initialized;
@@ -199,6 +246,14 @@ namespace ArenaShooter
             public DamageStamp Opposite;
             public bool RenderClosed = true;
             public bool RenderContour = true;
+            // Points always describe the hole on the front (+Normal) face. ShearPerDepth slides
+            // that cross-section per unit of depth so angled shots carve angled tunnels; UvOffset
+            // is the accumulated slide for this stamp's own plane (zero on front-face stamps,
+            // shear * thickness on the opposite-face stamp); MidDepthOffset samples the tunnel
+            // at half depth for solidity/support tests.
+            public Vector2 ShearPerDepth = Vector2.zero;
+            public Vector2 UvOffset = Vector2.zero;
+            public Vector2 MidDepthOffset = Vector2.zero;
         }
 
         private readonly struct ContourSegment2D
@@ -473,6 +528,332 @@ namespace ArenaShooter
             }
         }
 
+        // Shatters a falling slab into small edge-rendered fragments when it lands hard on a
+        // floor surface, leaving a brief reddish-orange glow on the floor at the impact point.
+        private sealed class FallingSlabImpactShatter : MonoBehaviour
+        {
+            private Material bodyMaterial;
+            private Material rimMaterial;
+            private StylizedOutlineCategory outlineCategory;
+            private int seed;
+            private bool shattered;
+
+            public void Initialize(Material material, Material edgeRimMaterial, StylizedOutlineCategory category, int randomSeed)
+            {
+                bodyMaterial = material;
+                rimMaterial = edgeRimMaterial;
+                outlineCategory = category;
+                seed = randomSeed;
+            }
+
+            private void OnCollisionEnter(Collision collision)
+            {
+                if (shattered || collision.rigidbody != null || collision.contactCount == 0)
+                {
+                    return;
+                }
+
+                var contact = collision.GetContact(0);
+                if (contact.normal.y < 0.65f || !IsFloorCollider(collision.collider))
+                {
+                    return;
+                }
+
+                var impactSpeed = Mathf.Abs(Vector3.Dot(collision.relativeVelocity, contact.normal));
+                if (impactSpeed < DebrisShatterMinImpactSpeed)
+                {
+                    return;
+                }
+
+                shattered = true;
+                SpawnShatterFragments(contact.point);
+                SpawnFloorImpactGlow(contact.point, collision.collider);
+                Destroy(gameObject);
+            }
+
+            private static bool IsFloorCollider(Collider collider)
+            {
+                var piece = collider.GetComponentInParent<DestructibleArenaPiece>();
+                if (piece != null)
+                {
+                    return piece.IsFloorSurface();
+                }
+
+                // Static, upward-facing geometry without a destructible piece is ground
+                // (terrain, thresholds); walls and pillars are excluded by their parent piece.
+                return true;
+            }
+
+            private void SpawnShatterFragments(Vector3 impactPoint)
+            {
+                var slabRenderer = GetComponent<Renderer>();
+                var bounds = slabRenderer != null ? slabRenderer.bounds : new Bounds(impactPoint, Vector3.one * 0.4f);
+                var size = bounds.size;
+                var faceArea = Mathf.Max(
+                    0.05f,
+                    Mathf.Max(size.x * size.y, Mathf.Max(size.y * size.z, size.x * size.z)));
+                var fragmentCount = Mathf.Clamp(
+                    Mathf.RoundToInt(faceArea * 26f),
+                    DebrisShatterMinFragments,
+                    DebrisShatterMaxFragments);
+                var body = GetComponent<Rigidbody>();
+                var carriedVelocity = body != null ? body.linearVelocity : Vector3.zero;
+                var sizeScale = Mathf.Clamp(Mathf.Max(size.x, Mathf.Max(size.y, size.z)), 0.5f, 1.6f);
+                for (var i = 0; i < fragmentCount; i++)
+                {
+                    var fragmentSeed = seed ^ (i * 374761393);
+
+                    // Glass-like shards: small irregular polygons extruded into thin
+                    // tapered plates, sizes biased toward tiny slivers.
+                    var shardRadius = sizeScale * Mathf.Lerp(
+                        0.05f,
+                        0.17f,
+                        Hash01(fragmentSeed ^ 0x1a3) * Hash01(fragmentSeed ^ 0x2b7));
+                    var shardThickness = shardRadius * Mathf.Lerp(0.26f, 0.8f, Hash01(fragmentSeed ^ 0x4d7));
+                    var shardMesh = CreateShatterShardMesh(fragmentSeed, shardRadius, shardThickness, out var shardRimMesh);
+
+                    var fragment = new GameObject("Wall Debris Shatter Fragment");
+                    var horizontalJitter = new Vector3(
+                        Mathf.Lerp(-bounds.extents.x, bounds.extents.x, Hash01(fragmentSeed ^ 0x25b)) * 0.85f,
+                        0f,
+                        Mathf.Lerp(-bounds.extents.z, bounds.extents.z, Hash01(fragmentSeed ^ 0x69d)) * 0.85f);
+                    fragment.transform.position = impactPoint + horizontalJitter +
+                        Vector3.up * Mathf.Lerp(0.06f, Mathf.Max(0.16f, size.y * 0.55f), Hash01(fragmentSeed ^ 0x3c5));
+                    fragment.transform.rotation = Quaternion.Euler(
+                        Mathf.Lerp(0f, 360f, Hash01(fragmentSeed ^ 0x111)),
+                        Mathf.Lerp(0f, 360f, Hash01(fragmentSeed ^ 0x222)),
+                        Mathf.Lerp(0f, 360f, Hash01(fragmentSeed ^ 0x333)));
+
+                    var fragmentFilter = fragment.AddComponent<MeshFilter>();
+                    fragmentFilter.sharedMesh = shardMesh;
+                    var fragmentRenderer = fragment.AddComponent<MeshRenderer>();
+                    fragmentRenderer.sharedMaterial = bodyMaterial;
+                    DroidRenderSetup.ApplyRenderer(fragmentRenderer, outlineCategory);
+
+                    // Every shard carries its own neon edge lines, matching the parent
+                    // slab's contour rim at miniature scale.
+                    if (shardRimMesh != null && rimMaterial != null)
+                    {
+                        var rim = new GameObject("Wall Debris Shatter Fragment Rim");
+                        rim.transform.SetParent(fragment.transform, false);
+                        var rimFilter = rim.AddComponent<MeshFilter>();
+                        rimFilter.sharedMesh = shardRimMesh;
+                        var rimRenderer = rim.AddComponent<MeshRenderer>();
+                        rimRenderer.sharedMaterial = rimMaterial;
+                        DroidRenderSetup.ApplyRenderer(rimRenderer, StylizedOutlineCategory.None);
+                    }
+
+                    var fragmentCollider = fragment.AddComponent<MeshCollider>();
+                    fragmentCollider.sharedMesh = shardMesh;
+                    fragmentCollider.convex = true;
+                    fragmentCollider.material = GetFallingDebrisPhysicsMaterial();
+
+                    var radial = new Vector3(horizontalJitter.x, 0f, horizontalJitter.z);
+                    radial = radial.sqrMagnitude > 0.0001f
+                        ? radial.normalized
+                        : new Vector3(Mathf.Lerp(-1f, 1f, Hash01(fragmentSeed ^ 0x77)), 0f, Mathf.Lerp(-1f, 1f, Hash01(fragmentSeed ^ 0x99))).normalized;
+                    var fragmentBody = fragment.AddComponent<Rigidbody>();
+                    fragmentBody.mass = 0.15f;
+                    fragmentBody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+                    fragmentBody.linearVelocity = carriedVelocity * 0.2f +
+                        radial * Mathf.Lerp(1f, 3.2f, Hash01(fragmentSeed ^ 0x5af)) +
+                        Vector3.up * Mathf.Lerp(0.9f, 2.6f, Hash01(fragmentSeed ^ 0x6b1));
+                    fragmentBody.angularVelocity = new Vector3(
+                        Mathf.Lerp(-12f, 12f, Hash01(fragmentSeed ^ 0x741)),
+                        Mathf.Lerp(-12f, 12f, Hash01(fragmentSeed ^ 0x852)),
+                        Mathf.Lerp(-12f, 12f, Hash01(fragmentSeed ^ 0x963)));
+                    fragment.AddComponent<FallingWallSlabAnimation>().Initialize(
+                        DebrisShatterFragmentLifetime * Mathf.Lerp(0.8f, 1.2f, Hash01(fragmentSeed ^ 0xa75)));
+                    fragment.AddComponent<ShatterShardMeshCleanup>().Initialize(shardMesh, shardRimMesh);
+                }
+            }
+
+            private void SpawnFloorImpactGlow(Vector3 impactPoint, Collider floorCollider)
+            {
+                var slabRenderer = GetComponent<Renderer>();
+                var size = slabRenderer != null ? slabRenderer.bounds.size : Vector3.one * 0.4f;
+                var fallbackRadius = Mathf.Clamp(Mathf.Max(size.x, size.z) * 0.8f, 0.3f, 1f);
+                var floorHexMaterial = ResolveFloorHexMaterial(floorCollider);
+
+                // One continuous layer: a debris-shaped bright core whose baked falloff
+                // mask dissolves to nothing at the rim, revealing the floor's red hex
+                // pattern inside the lit area.
+                var meshFilter = GetComponent<MeshFilter>();
+                var footprint = CreateImpactGlowFootprintMesh(
+                    meshFilter != null ? meshFilter.sharedMesh : null,
+                    transform,
+                    impactPoint,
+                    out var footprintRadius);
+                if (footprint != null)
+                {
+                    SpawnFloorImpactGlowLayer(impactPoint, 0.02f, footprint, Vector3.one, footprintRadius, floorHexMaterial, true);
+                    return;
+                }
+
+                SpawnFloorImpactGlowLayer(
+                    impactPoint,
+                    0.02f,
+                    GetImpactGlowMesh(),
+                    new Vector3(fallbackRadius, 1f, fallbackRadius),
+                    fallbackRadius,
+                    floorHexMaterial,
+                    false);
+            }
+
+            // The glow shader redraws the floor's hex pattern; pulling the size, line
+            // width, and origin off the actual floor material keeps the cells aligned.
+            private static Material ResolveFloorHexMaterial(Collider floorCollider)
+            {
+                if (floorCollider == null)
+                {
+                    return null;
+                }
+
+                var renderer = floorCollider.GetComponent<Renderer>();
+                if (renderer == null)
+                {
+                    renderer = floorCollider.GetComponentInParent<Renderer>();
+                }
+
+                if (renderer == null)
+                {
+                    return null;
+                }
+
+                var material = renderer.sharedMaterial;
+                return material != null && material.HasProperty("_HexSize") && material.HasProperty("_PatternOrigin")
+                    ? material
+                    : null;
+            }
+
+            private static void SpawnFloorImpactGlowLayer(
+                Vector3 impactPoint,
+                float heightOffset,
+                Mesh mesh,
+                Vector3 scale,
+                float footprintRadius,
+                Material floorHexMaterial,
+                bool ownsMesh)
+            {
+                var glow = new GameObject("Wall Debris Impact Glow");
+                glow.transform.position = impactPoint + Vector3.up * heightOffset;
+                glow.transform.localScale = scale;
+                var glowMeshFilter = glow.AddComponent<MeshFilter>();
+                glowMeshFilter.sharedMesh = mesh;
+                var glowRenderer = glow.AddComponent<MeshRenderer>();
+                var glowMaterial = CreateImpactGlowMaterial(floorHexMaterial);
+                if (glowMaterial.HasProperty("_ImpactCenter"))
+                {
+                    glowMaterial.SetVector("_ImpactCenter", new Vector4(impactPoint.x, 0f, impactPoint.z, 0f));
+                }
+
+                if (glowMaterial.HasProperty("_FootprintRadius"))
+                {
+                    glowMaterial.SetFloat("_FootprintRadius", Mathf.Max(0.2f, footprintRadius * Mathf.Max(scale.x, scale.z)));
+                }
+
+                glowRenderer.sharedMaterial = glowMaterial;
+                DroidRenderSetup.ApplyRenderer(glowRenderer, StylizedOutlineCategory.None);
+                glow.AddComponent<FloorImpactGlowAnimation>().Initialize(
+                    glowMaterial,
+                    DebrisImpactGlowColor,
+                    DebrisImpactGlowLifetime,
+                    ownsMesh ? mesh : null);
+            }
+        }
+
+        // Frees the per-shard procedural meshes when a shatter fragment despawns.
+        private sealed class ShatterShardMeshCleanup : MonoBehaviour
+        {
+            private Mesh bodyMesh;
+            private Mesh rimMesh;
+
+            public void Initialize(Mesh body, Mesh rim)
+            {
+                bodyMesh = body;
+                rimMesh = rim;
+            }
+
+            private void OnDestroy()
+            {
+                if (bodyMesh != null)
+                {
+                    Destroy(bodyMesh);
+                }
+
+                if (rimMesh != null)
+                {
+                    Destroy(rimMesh);
+                }
+            }
+        }
+
+        private sealed class FloorImpactGlowAnimation : MonoBehaviour
+        {
+            private Material material;
+            private Mesh ownedMesh;
+            private Color baseColor;
+            private Vector3 startScale;
+            private float duration;
+            private float elapsed;
+            private bool usesGlowShader;
+
+            public void Initialize(Material glowMaterial, Color color, float lifetimeSeconds, Mesh meshToDestroy)
+            {
+                material = glowMaterial;
+                ownedMesh = meshToDestroy;
+                baseColor = color;
+                duration = Mathf.Max(0.1f, lifetimeSeconds);
+                startScale = transform.localScale;
+                elapsed = 0f;
+                usesGlowShader = glowMaterial != null && glowMaterial.HasProperty("_Intensity");
+            }
+
+            private void Update()
+            {
+                elapsed += Time.deltaTime;
+                var t = Mathf.Clamp01(elapsed / duration);
+                // Flash on fast, spread slightly, then fade out — additive blending means
+                // zero intensity dissolves completely into the floor.
+                var pop = t < 0.1f ? Mathf.SmoothStep(0f, 1f, t / 0.1f) : 1f;
+                var fade = Mathf.Pow(1f - t, 1.7f);
+                var spread = Mathf.Lerp(1f, 1.16f, Mathf.SmoothStep(0f, 1f, t));
+                transform.localScale = new Vector3(startScale.x * pop * spread, startScale.y, startScale.z * pop * spread);
+                if (material != null)
+                {
+                    if (usesGlowShader)
+                    {
+                        material.SetFloat("_Intensity", pop * fade);
+                        material.SetFloat(
+                            "_RippleProgress",
+                            Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.04f, 0.6f, t)));
+                    }
+                    else
+                    {
+                        SetMaterialColor(material, baseColor * (pop * fade));
+                    }
+                }
+
+                if (elapsed >= duration)
+                {
+                    Destroy(gameObject);
+                }
+            }
+
+            private void OnDestroy()
+            {
+                if (material != null)
+                {
+                    Destroy(material);
+                }
+
+                if (ownedMesh != null)
+                {
+                    Destroy(ownedMesh);
+                }
+            }
+        }
+
         private sealed class DamageContourPlan
         {
             public readonly List<ContourSegment2D> FrontSegments;
@@ -518,6 +899,10 @@ namespace ArenaShooter
             destructibleBodyMaterial = null;
             clippedWallBodyMaterial = null;
             wallDamageStamps.Clear();
+            cachedScanGrid = null;
+            cachedScanGridStampCount = -1;
+            lastPocketAbsorptionStampCount = -1;
+            lastSplinterAbsorptionStampCount = -1;
             if (!initialized)
             {
                 chunks.Clear();
@@ -581,6 +966,8 @@ namespace ArenaShooter
             var piece = slab.AddComponent<DestructibleArenaPiece>();
             piece.forcedWallNormalLocal = wallNormalLocal;
             piece.suppressSurvivingColliders = true;
+            piece.pillarAxisSlabMode = true;
+            piece.pillarRouterPiece = this;
             piece.Configure(maxHealth, sourceSize, intactMaterial, configuredOutlineCategory, DestructibleDamageProfile.Wall, Vector3.zero);
             var slabCollider = slab.GetComponent<BoxCollider>();
             if (slabCollider != null)
@@ -607,6 +994,21 @@ namespace ArenaShooter
                 island.Points.Count < 3)
             {
                 return;
+            }
+
+            // The sibling models the perpendicular axis; a mirrored band wipes its full width at
+            // these heights. That is only physical when the falling section spans this slab's
+            // whole horizontal extent (a severed cross-section). Partial chips keep the sibling
+            // axis intact.
+            if (TryGetContourOwnedWallBasis(0f, out _, out _, out _, out _, out var bounds) &&
+                TryGetWallUvUpAxis(u, v, out var upIsU, out _))
+            {
+                var horizontalExtent = upIsU ? island.Max.y - island.Min.y : island.Max.x - island.Min.x;
+                var horizontalSpan = upIsU ? bounds.Height : bounds.Width;
+                if (horizontalExtent < horizontalSpan - Mathf.Max(PillarSeveranceSliverWidth, horizontalSpan * 0.18f))
+                {
+                    return;
+                }
             }
 
             var minY = float.PositiveInfinity;
@@ -653,6 +1055,204 @@ namespace ArenaShooter
             RebuildCombinedMesh();
         }
 
+        private Vector3 ResolvePillarSlabToppleDirectionWorld()
+        {
+            if (pillarRouterPiece != null)
+            {
+                return pillarRouterPiece.ResolvePillarToppleDirectionWorld();
+            }
+
+            var fallback = transform.TransformDirection(GetWallNormalLocal());
+            fallback.y = 0f;
+            return fallback.sqrMagnitude > 0.0001f ? fallback.normalized : Vector3.forward;
+        }
+
+        private Vector3 ResolvePillarToppleDirectionWorld()
+        {
+            // Walls braced against a face keep the pillar from falling that way; probe each
+            // horizontal face for adjacent static geometry and topple toward the open sides.
+            var size = GetSourceSize();
+            var free = Vector3.zero;
+            foreach (var localDirection in PillarBraceProbeDirections)
+            {
+                var worldDirection = transform.TransformDirection(localDirection);
+                var faceHalfExtent = Vector3.Dot(AbsVector(size), AbsVector(localDirection)) * 0.5f;
+                var probeCenter = transform.position + worldDirection * (faceHalfExtent + PillarBraceProbeDepth * 0.5f);
+                var probeHalfExtents = new Vector3(0.24f, Mathf.Max(0.3f, size.y * 0.25f), 0.24f);
+                var braced = false;
+                foreach (var candidate in Physics.OverlapBox(probeCenter, probeHalfExtents, transform.rotation))
+                {
+                    if (candidate == null ||
+                        candidate.isTrigger ||
+                        candidate.attachedRigidbody != null ||
+                        candidate.transform.IsChildOf(transform))
+                    {
+                        continue;
+                    }
+
+                    braced = true;
+                    break;
+                }
+
+                if (!braced)
+                {
+                    free += worldDirection;
+                }
+            }
+
+            free.y = 0f;
+            if (free.sqrMagnitude > 0.0001f)
+            {
+                return free.normalized;
+            }
+
+            var bite = configuredBiteDirectionLocal.sqrMagnitude > 0.0001f
+                ? transform.TransformDirection(configuredBiteDirectionLocal)
+                : transform.forward;
+            bite.y = 0f;
+            return bite.sqrMagnitude > 0.0001f ? bite.normalized : Vector3.forward;
+        }
+
+        private void RebuildPillarRouterColliders()
+        {
+            if (!isPillarRouter || axisSlabX == null || axisSlabZ == null || surfaceCollider == null)
+            {
+                return;
+            }
+
+            var rectsX = axisSlabX.CollectSurvivingColliderRects();
+            var rectsZ = axisSlabZ.CollectSurvivingColliderRects();
+            if (rectsX == null && rectsZ == null)
+            {
+                return;
+            }
+
+            // Slab X rects are (minY, minZ, maxY, maxZ); slab Z rects are (minX, minY, maxX, maxY).
+            // Surviving pillar material is the intersection of both prisms.
+            var size = GetSourceSize();
+            rectsX ??= new List<Vector4> { new(-size.y * 0.5f, -size.z * 0.5f, size.y * 0.5f, size.z * 0.5f) };
+            rectsZ ??= new List<Vector4> { new(-size.x * 0.5f, -size.y * 0.5f, size.x * 0.5f, size.y * 0.5f) };
+
+            if (pillarColliderRoot == null)
+            {
+                pillarColliderRoot = new GameObject("Destructible Pillar Colliders");
+                pillarColliderRoot.transform.SetParent(transform, false);
+            }
+
+            var previousColliders = pillarColliderRoot.GetComponents<BoxCollider>();
+            for (var i = 0; i < previousColliders.Length; i++)
+            {
+                if (Application.isPlaying)
+                {
+                    Destroy(previousColliders[i]);
+                }
+                else
+                {
+                    DestroyImmediate(previousColliders[i]);
+                }
+            }
+
+            surfaceCollider.enabled = false;
+            var emitted = 0;
+            foreach (var rectX in rectsX)
+            {
+                foreach (var rectZ in rectsZ)
+                {
+                    var minY = Mathf.Max(rectX.x, rectZ.y);
+                    var maxY = Mathf.Min(rectX.z, rectZ.w);
+                    if (maxY - minY <= 0.005f)
+                    {
+                        continue;
+                    }
+
+                    if (emitted >= MaxPillarRouterColliders)
+                    {
+                        return;
+                    }
+
+                    var box = pillarColliderRoot.AddComponent<BoxCollider>();
+                    box.center = new Vector3((rectZ.x + rectZ.z) * 0.5f, (minY + maxY) * 0.5f, (rectX.y + rectX.w) * 0.5f);
+                    box.size = new Vector3(rectZ.z - rectZ.x, maxY - minY, rectX.w - rectX.y);
+                    emitted++;
+                }
+            }
+        }
+
+        private void RemoveSeveredPillarSections(Vector3 hitNormalWorld)
+        {
+            if (!UsesContourOwnedWallDamage() ||
+                wallDamageStamps.Count == 0 ||
+                !TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out var bounds) ||
+                !TryGetWallUvUpAxis(u, v, out var upIsU, out var upSign))
+            {
+                return;
+            }
+
+            var grid = BuildUnsupportedIslandScanGrid(bounds);
+            if (grid.Count == 0)
+            {
+                return;
+            }
+
+            // A pillar section only falls when a height band is cut through the slab's full
+            // width (slivers thinner than the limit cannot carry the load). Everything above
+            // the lowest severed band topples away from the bracing walls as one piece.
+            var horizontalCount = CantileverHorizontalCount(grid, upIsU);
+            var verticalCount = CantileverVerticalCount(grid, upIsU);
+            var horizontalStep = CantileverHorizontalStep(grid, upIsU);
+            var sliverLimit = Mathf.Max(PillarSeveranceSliverWidth, horizontalStep * 2f);
+            var severedStep = -1;
+            for (var step = 0; step < verticalCount; step++)
+            {
+                var w = upSign > 0f ? step : verticalCount - 1 - step;
+                var solidWidth = 0f;
+                for (var h = 0; h < horizontalCount; h++)
+                {
+                    if (grid.Solid[CantileverCellIndex(grid, upIsU, h, w)])
+                    {
+                        solidWidth += horizontalStep;
+                    }
+                }
+
+                if (solidWidth <= sliverLimit)
+                {
+                    severedStep = step;
+                    break;
+                }
+            }
+
+            if (severedStep < 0)
+            {
+                return;
+            }
+
+            var cells = new List<int>();
+            var mask = new bool[grid.Count];
+            for (var step = severedStep; step < verticalCount; step++)
+            {
+                var w = upSign > 0f ? step : verticalCount - 1 - step;
+                for (var h = 0; h < horizontalCount; h++)
+                {
+                    var index = CantileverCellIndex(grid, upIsU, h, w);
+                    if (grid.Solid[index])
+                    {
+                        cells.Add(index);
+                        mask[index] = true;
+                    }
+                }
+            }
+
+            if (cells.Count == 0 || !TryCreateUnsupportedIslandFromCells(grid, cells, mask, out var island))
+            {
+                return;
+            }
+
+            AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
+            var slabBudget = applyingMirroredStructuralFall ? 0 : 1;
+            SpawnFallingWallSlab(island, normal, u, v, halfN, ref slabBudget, ResolvePillarSlabToppleDirectionWorld());
+            MirrorStructuralFallToSibling(island, u, v);
+        }
+
         private void OnDestroy()
         {
             ReleaseWallDamageShaderBuffers();
@@ -670,6 +1270,11 @@ namespace ArenaShooter
 
         public void TakeDamage(float amount, Vector3 hitPoint, Vector3 hitNormal, Collider hitCollider)
         {
+            TakeDamage(amount, hitPoint, hitNormal, hitCollider, Vector3.zero);
+        }
+
+        public void TakeDamage(float amount, Vector3 hitPoint, Vector3 hitNormal, Collider hitCollider, Vector3 shotDirectionWorld)
+        {
             if (amount <= 0f)
             {
                 return;
@@ -677,17 +1282,25 @@ namespace ArenaShooter
 
             if (isPillarRouter && axisSlabX != null && axisSlabZ != null)
             {
-                ResolvePillarAxisSlab(hitNormal).TakeDamage(amount, hitPoint, hitNormal, hitCollider);
+                ResolvePillarAxisSlab(hitNormal).TakeDamage(amount, hitPoint, hitNormal, hitCollider, shotDirectionWorld);
                 return;
             }
 
             InitializeChunks();
             if (UsesContourOwnedWallDamage())
             {
-                var stamp = AddContourOwnedWallDamage(hitPoint);
-                SpawnContourOwnedWallHitSpray(stamp, hitNormal);
+                // Remember the shot so debris freed by this hit inherits its energy as a real
+                // impulse instead of a synthetic kick.
+                lastDamageHitPointWorld = hitPoint;
+                lastDamageShotDirectionWorld = shotDirectionWorld.sqrMagnitude > 0.0001f
+                    ? shotDirectionWorld.normalized
+                    : Vector3.zero;
+                hasLastDamageImpulse = lastDamageShotDirectionWorld.sqrMagnitude > 0.5f;
+                var stamp = AddContourOwnedWallDamage(hitPoint, shotDirectionWorld);
+                SpawnContourOwnedWallHitSpray(stamp, hitNormal, shotDirectionWorld);
                 RemoveUnsupportedContourOwnedWallIslands(hitNormal);
                 RebuildCombinedMesh();
+                hasLastDamageImpulse = false;
                 return;
             }
 
@@ -717,13 +1330,14 @@ namespace ArenaShooter
 
             if (isPillarRouter && axisSlabX != null && axisSlabZ != null)
             {
-                return ResolvePillarAxisSlab(hitNormal).AllowsProjectilePassThrough(hitPoint, hitNormal);
+                // Material is gone wherever either axis slab carved its prism through the box.
+                return axisSlabX.AllowsProjectilePassThrough(hitPoint, hitNormal) ||
+                    axisSlabZ.AllowsProjectilePassThrough(hitPoint, hitNormal);
             }
 
             if (UsesContourOwnedWallDamage())
             {
-                var localPoint = transform.InverseTransformPoint(hitPoint);
-                return IsPointInsideWallDamageUnion(ProjectLocalPointToWallUv(localPoint));
+                return IsLocalPointInsideWallDamageUnion(transform.InverseTransformPoint(hitPoint));
             }
 
             var chunk = FindHitChunk(hitPoint);
@@ -733,6 +1347,88 @@ namespace ArenaShooter
         public bool IsFloorSurface()
         {
             return damageProfile == DestructibleDamageProfile.Floor || configuredOutlineCategory == StylizedOutlineCategory.Floor;
+        }
+
+        // A shot that enters through an existing hole can still strike surviving material
+        // deeper inside the piece (the wall of an angled tunnel, the far side of a corner
+        // bite). Colliders are full-thickness approximations, so march the exact stamp union
+        // along the ray to find the first real material point.
+        public bool TryGetMaterialHitAlongRay(Vector3 origin, Vector3 direction, out Vector3 materialPoint, out Vector3 materialNormal)
+        {
+            materialPoint = default;
+            materialNormal = default;
+            if (!initialized || direction.sqrMagnitude <= 0.0001f)
+            {
+                return false;
+            }
+
+            if (!isPillarRouter && !UsesContourOwnedWallDamage())
+            {
+                return false;
+            }
+
+            var localOrigin = transform.InverseTransformPoint(origin);
+            var localDirection = transform.InverseTransformDirection(direction.normalized);
+            var half = GetSourceSize() * 0.5f;
+            if (!TryIntersectLocalBox(localOrigin, localDirection, half, out var entryT, out var exitT))
+            {
+                return false;
+            }
+
+            const float stepSize = 0.025f;
+            var t = Mathf.Max(entryT, 0f) + stepSize * 0.5f;
+            for (var step = 0; step < 96 && t < exitT; step++, t += stepSize)
+            {
+                var sample = localOrigin + localDirection * t;
+                if (HasMaterialAtLocalPoint(sample))
+                {
+                    materialPoint = transform.TransformPoint(sample);
+                    materialNormal = -direction.normalized;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool HasMaterialAtLocalPoint(Vector3 localPoint)
+        {
+            if (isPillarRouter)
+            {
+                return axisSlabX != null &&
+                    axisSlabZ != null &&
+                    !axisSlabX.IsLocalPointInsideWallDamageUnion(localPoint) &&
+                    !axisSlabZ.IsLocalPointInsideWallDamageUnion(localPoint);
+            }
+
+            return !IsLocalPointInsideWallDamageUnion(localPoint);
+        }
+
+        private static bool TryIntersectLocalBox(Vector3 origin, Vector3 direction, Vector3 half, out float entryT, out float exitT)
+        {
+            entryT = float.NegativeInfinity;
+            exitT = float.PositiveInfinity;
+            for (var axis = 0; axis < 3; axis++)
+            {
+                var component = direction[axis];
+                if (Mathf.Abs(component) <= 0.000001f)
+                {
+                    if (Mathf.Abs(origin[axis]) > half[axis])
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                var inverse = 1f / component;
+                var tA = (-half[axis] - origin[axis]) * inverse;
+                var tB = (half[axis] - origin[axis]) * inverse;
+                entryT = Mathf.Max(entryT, Mathf.Min(tA, tB));
+                exitT = Mathf.Min(exitT, Mathf.Max(tA, tB));
+            }
+
+            return exitT > entryT && exitT > 0f;
         }
 
         public bool TryResolvePlayerVault(Vector3 playerPosition, Vector3 playerForward, float playerRadius, float playerHeight, out PlayerVaultSolution solution)
@@ -1578,7 +2274,7 @@ namespace ArenaShooter
                 UsesStructuralWallOutlineSource();
         }
 
-        private DamageStamp AddContourOwnedWallDamage(Vector3 hitPoint)
+        private DamageStamp AddContourOwnedWallDamage(Vector3 hitPoint, Vector3 shotDirectionWorld)
         {
             if (!TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out var bounds))
             {
@@ -1586,7 +2282,11 @@ namespace ArenaShooter
             }
 
             var localHit = transform.InverseTransformPoint(hitPoint);
-            var center = new Vector2(Vector3.Dot(localHit, u), Vector3.Dot(localHit, v));
+            var shearPerDepth = CalculateWallDamageShear(shotDirectionWorld, normal, u, v);
+            // Project the hit back along the shot direction onto the front (+normal) face so the
+            // tunnel passes through the actual impact point regardless of which face was struck.
+            var depthAtHit = halfN - Vector3.Dot(localHit, normal);
+            var center = new Vector2(Vector3.Dot(localHit, u), Vector3.Dot(localHit, v)) - shearPerDepth * depthAtHit;
             var halfU = Mathf.Min(
                 Mathf.Max(0.12f, bounds.Width / Mathf.Max(1, CalculateCellCount(bounds.Width)) * 0.5f),
                 bounds.Width * 0.21f);
@@ -1596,6 +2296,13 @@ namespace ArenaShooter
             var stampRadius = Mathf.Min(halfU, halfV);
             halfU = stampRadius;
             halfV = stampRadius;
+            // A grazing shot back-projected across the thickness can land the center past the
+            // face bounds, leaving only a sliver of the polygon on the piece; pull it back so a
+            // real hole is carved. Pillar slabs keep a small inset so most of the hole stays on
+            // the struck face (overflow is handled by the sibling via dual-basis clipping).
+            var centerInset = pillarAxisSlabMode ? stampRadius * 0.6f : 0f;
+            center.x = ClampToCenteredRange(center.x, bounds.MinU + centerInset, bounds.MaxU - centerInset);
+            center.y = ClampToCenteredRange(center.y, bounds.MinV + centerInset, bounds.MaxV - centerInset);
             var stamp = CreateContourOwnedWallDamageStamp(
                 center,
                 normal,
@@ -1604,9 +2311,43 @@ namespace ArenaShooter
                 halfN,
                 halfU * 1.08f,
                 halfV * 1.08f,
-                CalculateContourOwnedWallDamageSeed(center));
+                CalculateContourOwnedWallDamageSeed(center),
+                shearPerDepth,
+                bounds);
             wallDamageStamps.Add(stamp);
             return stamp;
+        }
+
+        private static float ClampToCenteredRange(float value, float min, float max)
+        {
+            return min > max ? (min + max) * 0.5f : Mathf.Clamp(value, min, max);
+        }
+
+        private Vector2 CalculateWallDamageShear(Vector3 shotDirectionWorld, Vector3 normal, Vector3 u, Vector3 v)
+        {
+            if (shotDirectionWorld.sqrMagnitude <= 0.0001f)
+            {
+                return Vector2.zero;
+            }
+
+            var local = transform.InverseTransformDirection(shotDirectionWorld.normalized);
+            var along = Vector3.Dot(local, normal);
+            if (Mathf.Abs(along) <= 0.05f)
+            {
+                return Vector2.zero;
+            }
+
+            if (along > 0f)
+            {
+                // Normalize the travel direction to run front (+normal) face to back face.
+                local = -local;
+                along = -along;
+            }
+
+            var shear = new Vector2(Vector3.Dot(local, u), Vector3.Dot(local, v)) / -along;
+            shear.x = Mathf.Clamp(shear.x, -MaxWallDamageShearPerDepth, MaxWallDamageShearPerDepth);
+            shear.y = Mathf.Clamp(shear.y, -MaxWallDamageShearPerDepth, MaxWallDamageShearPerDepth);
+            return shear;
         }
 
         private void RemoveUnsupportedContourOwnedWallIslands()
@@ -1624,15 +2365,304 @@ namespace ArenaShooter
                 return;
             }
 
-            var sprayDirectionWorld = hitNormalWorld.sqrMagnitude > 0.0001f
-                ? -hitNormalWorld.normalized
-                : transform.TransformDirection(-normal);
-            var sprayBudget = MaxUnsupportedIslandSpraysPerDamage;
-            var slabBudget = MaxFallingSlabsPerDamage;
+            var sprayDirectionWorld = hasLastDamageImpulse
+                ? lastDamageShotDirectionWorld
+                : hitNormalWorld.sqrMagnitude > 0.0001f
+                    ? -hitNormalWorld.normalized
+                    : transform.TransformDirection(-normal);
+            AbsorbEnclosedDamagePockets(normal, u, v, halfN);
+            AbsorbDetachedDepthSplinters(normal, u, v, halfN, bounds);
+            // A mirrored structural fall only consumes material the originating slab already
+            // turned into debris — spawning again here would duplicate it.
+            var sprayBudget = applyingMirroredStructuralFall ? 0 : MaxUnsupportedIslandSpraysPerDamage;
+            var slabBudget = applyingMirroredStructuralFall ? 0 : MaxFallingSlabsPerDamage;
             RunUnsupportedIslandCleanupPasses(normal, u, v, halfN, bounds, sprayDirectionWorld, ref sprayBudget, ref slabBudget);
-            RemoveCantileverCollapsedWallSections(hitNormalWorld);
-            RemovePedestalCrushedWallSections(hitNormalWorld);
+            if (pillarAxisSlabMode)
+            {
+                // The cantilever/pedestal heuristics are tuned for wide walls and misfire on a
+                // slender braced pillar; pillars only shed their top once a band is cut through.
+                RemoveSeveredPillarSections(hitNormalWorld);
+            }
+            else
+            {
+                RemoveCantileverCollapsedWallSections(hitNormalWorld);
+                RemovePedestalCrushedWallSections(hitNormalWorld);
+            }
+
             RunUnsupportedIslandCleanupPasses(normal, u, v, halfN, bounds, sprayDirectionWorld, ref sprayBudget, ref slabBudget);
+        }
+
+        // Two overlapping jagged hole polygons can enclose slivers of real material that are
+        // thinner than the island scan resolution: the shader keeps drawing them but no
+        // structural pass can ever remove them. Detect those pockets exactly on the contour
+        // union and stamp them out so the material truly disappears everywhere (rendering,
+        // colliders, pass-through).
+        private void AbsorbEnclosedDamagePockets(Vector3 normal, Vector3 u, Vector3 v, float halfN)
+        {
+            if (wallDamageStamps.Count < 2 || wallDamageStamps.Count == lastPocketAbsorptionStampCount)
+            {
+                return;
+            }
+
+            // Sheared tunnels can enclose pockets that exist only deeper in the material, so
+            // the contour analysis runs at the front, middle and back depth when needed.
+            var depthSteps = CalculateWallDamageStampsHaveShear() ? 2 : 0;
+            List<DamageStamp> absorbed = null;
+            for (var step = 0; step <= depthSteps; step++)
+            {
+                AbsorbEnclosedDamagePocketsAtDepth(normal, u, v, halfN, step, ref absorbed);
+            }
+
+            if (absorbed != null)
+            {
+                wallDamageStamps.AddRange(absorbed);
+            }
+
+            lastPocketAbsorptionStampCount = wallDamageStamps.Count;
+        }
+
+        private void AbsorbEnclosedDamagePocketsAtDepth(
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float halfN,
+            int halfDepthSteps,
+            ref List<DamageStamp> absorbed)
+        {
+            var thickness = GetContourOwnedWallContourThickness();
+            var segments = BuildStampUnionDamageSegments(wallDamageStamps, thickness, true, false, halfDepthSteps * halfN);
+            if (segments.Count < 4)
+            {
+                return;
+            }
+
+            var groups = BuildContourSegmentGroups(segments, Mathf.Max(0.002f, thickness * 0.35f));
+            var spanLimit = Mathf.Min(PocketAbsorptionMaxSpan, CalculateSmallInteriorIslandSpanLimit(wallDamageStamps));
+            for (var i = 0; i < groups.Count; i++)
+            {
+                var group = groups[i];
+                var span = group.Span;
+                if (Mathf.Max(span.x, span.y) > spanLimit)
+                {
+                    continue;
+                }
+
+                // A pocket is a small contour cluster whose interior is material while its
+                // immediate surroundings are hole. Clip-fragmented loops rarely register as
+                // "closed", so probe geometry directly instead of relying on loop topology.
+                var centroid = group.Centroid;
+                if (IsPointInsideWallDamageUnionAtHalfDepthSteps(centroid, halfDepthSteps))
+                {
+                    continue;
+                }
+
+                var probeMin = group.Min - Vector2.one * PocketProbePadding;
+                var probeMax = group.Max + Vector2.one * PocketProbePadding;
+                if (!IsPointInsideWallDamageUnionAtHalfDepthSteps(new Vector2(probeMin.x, probeMin.y), halfDepthSteps) ||
+                    !IsPointInsideWallDamageUnionAtHalfDepthSteps(new Vector2(probeMax.x, probeMin.y), halfDepthSteps) ||
+                    !IsPointInsideWallDamageUnionAtHalfDepthSteps(new Vector2(probeMax.x, probeMax.y), halfDepthSteps) ||
+                    !IsPointInsideWallDamageUnionAtHalfDepthSteps(new Vector2(probeMin.x, probeMax.y), halfDepthSteps))
+                {
+                    continue;
+                }
+
+                absorbed ??= new List<DamageStamp>();
+                absorbed.Add(CreateDamagePocketAbsorptionStamp(group, segments, normal, u, v, halfN, halfDepthSteps * halfN));
+            }
+        }
+
+        // Two tunnels carved at different angles can leave thin partial-depth wedges floating
+        // inside the merged volume. Their (u,v) columns hold material at *some* depth, so the
+        // 2D support model thinks they are attached. A column that is nowhere full-thickness
+        // and whose cluster touches no full-thickness column is a detached shaving — remove it.
+        private void AbsorbDetachedDepthSplinters(Vector3 normal, Vector3 u, Vector3 v, float halfN, DamageComponentPlaneBounds bounds)
+        {
+            if (wallDamageStamps.Count < 2 ||
+                wallDamageStamps.Count == lastSplinterAbsorptionStampCount ||
+                !CalculateWallDamageStampsHaveShear())
+            {
+                return;
+            }
+
+            lastSplinterAbsorptionStampCount = wallDamageStamps.Count;
+            var grid = BuildUnsupportedIslandScanGrid(bounds);
+            if (grid.Count == 0)
+            {
+                return;
+            }
+
+            var fullThickness = new bool[grid.Count];
+            for (var y = 0; y < grid.Rows; y++)
+            {
+                for (var x = 0; x < grid.Columns; x++)
+                {
+                    var index = grid.Index(x, y);
+                    if (!grid.Solid[index])
+                    {
+                        continue;
+                    }
+
+                    var center = grid.CellCenter(x, y);
+                    fullThickness[index] =
+                        !IsPointInsideWallDamageUnionAtHalfDepthSteps(center, 0) &&
+                        !IsPointInsideWallDamageUnionAtHalfDepthSteps(center, 1) &&
+                        !IsPointInsideWallDamageUnionAtHalfDepthSteps(center, 2);
+                }
+            }
+
+            var visited = new bool[grid.Count];
+            var cluster = new List<int>();
+            var queue = new Queue<int>();
+            List<DamageStamp> absorbed = null;
+            for (var index = 0; index < grid.Count; index++)
+            {
+                if (!grid.Solid[index] || fullThickness[index] || visited[index])
+                {
+                    continue;
+                }
+
+                cluster.Clear();
+                var touchesFullThickness = false;
+                visited[index] = true;
+                queue.Enqueue(index);
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+                    cluster.Add(current);
+                    var x = grid.CellX(current);
+                    var y = grid.CellY(current);
+                    for (var i = 0; i < IslandScanNeighborOffsets.Length; i++)
+                    {
+                        var neighborX = x + IslandScanNeighborOffsets[i].x;
+                        var neighborY = y + IslandScanNeighborOffsets[i].y;
+                        if (!grid.ContainsCell(neighborX, neighborY))
+                        {
+                            continue;
+                        }
+
+                        var neighbor = grid.Index(neighborX, neighborY);
+                        if (!grid.Solid[neighbor])
+                        {
+                            continue;
+                        }
+
+                        if (fullThickness[neighbor])
+                        {
+                            touchesFullThickness = true;
+                            continue;
+                        }
+
+                        if (!visited[neighbor])
+                        {
+                            visited[neighbor] = true;
+                            queue.Enqueue(neighbor);
+                        }
+                    }
+                }
+
+                if (touchesFullThickness || cluster.Count == 0)
+                {
+                    continue;
+                }
+
+                var min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
+                var max = new Vector2(float.NegativeInfinity, float.NegativeInfinity);
+                for (var i = 0; i < cluster.Count; i++)
+                {
+                    var center = grid.CellCenter(grid.CellX(cluster[i]), grid.CellY(cluster[i]));
+                    min = Vector2.Min(min, center);
+                    max = Vector2.Max(max, center);
+                }
+
+                min -= new Vector2(grid.StepU, grid.StepV) * 0.5f + Vector2.one * UnsupportedIslandCleanupPadding;
+                max += new Vector2(grid.StepU, grid.StepV) * 0.5f + Vector2.one * UnsupportedIslandCleanupPadding;
+                var splinterStamp = new DamageStamp
+                {
+                    Normal = normal,
+                    U = u,
+                    V = v,
+                    Plane = halfN + DamageContourInset,
+                    Min = min,
+                    Max = max,
+                    Points = new[]
+                    {
+                        new Vector2(min.x, min.y),
+                        new Vector2(max.x, min.y),
+                        new Vector2(max.x, max.y),
+                        new Vector2(min.x, max.y)
+                    },
+                    RenderContour = false
+                };
+                splinterStamp.Opposite = CreateOppositeContourOwnedWallStamp(splinterStamp, normal, halfN);
+                splinterStamp.Opposite.RenderContour = false;
+                absorbed ??= new List<DamageStamp>();
+                absorbed.Add(splinterStamp);
+            }
+
+            if (absorbed != null)
+            {
+                wallDamageStamps.AddRange(absorbed);
+                lastSplinterAbsorptionStampCount = wallDamageStamps.Count;
+            }
+        }
+
+        private static DamageStamp CreateDamagePocketAbsorptionStamp(
+            ContourSegmentGroup group,
+            List<ContourSegment2D> segments,
+            Vector3 normal,
+            Vector3 u,
+            Vector3 v,
+            float halfN,
+            float groupDepth)
+        {
+            // Track the local tunnel direction so the absorbed pocket follows its neighbors
+            // through the thickness instead of punching a stray straight hole.
+            var shear = Vector2.zero;
+            var shearSamples = 0;
+            foreach (var segmentIndex in group.SegmentIndexes)
+            {
+                var stamp = segments[segmentIndex].Stamp;
+                if (stamp == null)
+                {
+                    continue;
+                }
+
+                shear += stamp.ShearPerDepth;
+                shearSamples++;
+            }
+
+            if (shearSamples > 0)
+            {
+                shear /= shearSamples;
+            }
+
+            // Group bounds were measured in the world UV of their depth; shift them back to
+            // the front plane where stamp polygons live.
+            var frontOffset = shear * groupDepth;
+            var min = group.Min - frontOffset - Vector2.one * UnsupportedIslandCleanupPadding;
+            var max = group.Max - frontOffset + Vector2.one * UnsupportedIslandCleanupPadding;
+            var pocketStamp = new DamageStamp
+            {
+                Normal = normal,
+                U = u,
+                V = v,
+                Plane = halfN + DamageContourInset,
+                Min = min,
+                Max = max,
+                Points = new[]
+                {
+                    new Vector2(min.x, min.y),
+                    new Vector2(max.x, min.y),
+                    new Vector2(max.x, max.y),
+                    new Vector2(min.x, max.y)
+                },
+                RenderContour = false,
+                ShearPerDepth = shear,
+                MidDepthOffset = shear * halfN
+            };
+            pocketStamp.Opposite = CreateOppositeContourOwnedWallStamp(pocketStamp, normal, halfN);
+            pocketStamp.Opposite.RenderContour = false;
+            return pocketStamp;
         }
 
         private void RunUnsupportedIslandCleanupPasses(
@@ -1662,6 +2692,16 @@ namespace ArenaShooter
                         AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
                         SpawnFallingWallSlab(island, normal, u, v, halfN, ref slabBudget);
                         MirrorStructuralFallToSibling(island, u, v);
+                        removedAnyIsland = true;
+                        continue;
+                    }
+
+                    if (applyingMirroredStructuralFall)
+                    {
+                        // Mirrored cleanup suppresses effects, but the material must still be
+                        // stamped out — skipping left orphan shards that no later pass could
+                        // reach until this exact piece was shot again.
+                        AddUnsupportedWallIslandCleanupStamp(island, normal, u, v, halfN);
                         removedAnyIsland = true;
                         continue;
                     }
@@ -2358,7 +3398,7 @@ namespace ArenaShooter
                 return islands;
             }
 
-            var coreLabels = LabelSupportCoreComponents(grid, out var coreSupported);
+            var coreLabels = LabelSupportCoreComponents(grid, CalculateTopPerimeterSupportExclusionMask(), out var coreSupported);
             var ownerLabels = AssignSolidCellsToSupportCores(grid, coreLabels);
             var unsupportedCells = BuildUnsupportedSolidMask(grid, ownerLabels, coreSupported);
             AddUnsupportedIslandComponents(grid, unsupportedCells, islands);
@@ -2370,6 +3410,15 @@ namespace ArenaShooter
 
         private UnsupportedIslandScanGrid BuildUnsupportedIslandScanGrid(DamageComponentPlaneBounds bounds)
         {
+            // Stamps are append-only, so the count identifies the damage state exactly. A
+            // single shot rebuilds this grid roughly a dozen times (island passes, structural
+            // passes, colliders, outline quads); reusing it removes most of the per-shot hitch.
+            if (cachedScanGrid != null && cachedScanGridStampCount == wallDamageStamps.Count)
+            {
+                return cachedScanGrid;
+            }
+
+            scanStampsHaveShear = CalculateWallDamageStampsHaveShear();
             var cellSize = Mathf.Max(
                 UnsupportedIslandScanTargetCellSize,
                 bounds.Width / UnsupportedIslandScanMaxCellsPerAxis,
@@ -2403,12 +3452,14 @@ namespace ArenaShooter
                 }
             }
 
+            cachedScanGrid = grid;
+            cachedScanGridStampCount = wallDamageStamps.Count;
             return grid;
         }
 
         private bool IsWallMaterialPresentInScanCell(UnsupportedIslandScanGrid grid, int x, int y)
         {
-            if (!IsPointInsideWallDamageUnion(grid.CellCenter(x, y)))
+            if (!IsPointInsideWallDamageUnionThroughDepth(grid.CellCenter(x, y)))
             {
                 return true;
             }
@@ -2434,7 +3485,7 @@ namespace ArenaShooter
                 sample.x <= grid.Bounds.MaxU &&
                 sample.y >= grid.Bounds.MinV &&
                 sample.y <= grid.Bounds.MaxV &&
-                !IsPointInsideWallDamageUnion(sample);
+                !IsPointInsideWallDamageUnionThroughDepth(sample);
         }
 
         private static bool IsSupportCoreCell(UnsupportedIslandScanGrid grid, int x, int y)
@@ -2469,7 +3520,33 @@ namespace ArenaShooter
             return sampleCount > 0;
         }
 
-        private static int[] LabelSupportCoreComponents(UnsupportedIslandScanGrid grid, out bool[] coreSupported)
+        // Nothing rests on a wall's top edge, so contact there must not count as support;
+        // returns the perimeter side-mask bits of edges that provide no real support. A
+        // wall's side edges abut neighboring structure and stay supportive, but a pillar
+        // slab's side edges are its open faces — only the ground holds a pillar up.
+        private int CalculateTopPerimeterSupportExclusionMask()
+        {
+            if (!TryGetContourOwnedWallBasis(0f, out _, out var u, out var v, out _, out _) ||
+                !TryGetWallUvUpAxis(u, v, out var upIsU, out var upSign))
+            {
+                return 0;
+            }
+
+            if (pillarAxisSlabMode)
+            {
+                var bottomBit = upIsU ? (upSign > 0f ? 1 : 2) : (upSign > 0f ? 4 : 8);
+                return 15 & ~bottomBit;
+            }
+
+            if (upIsU)
+            {
+                return upSign > 0f ? 2 : 1;
+            }
+
+            return upSign > 0f ? 8 : 4;
+        }
+
+        private static int[] LabelSupportCoreComponents(UnsupportedIslandScanGrid grid, int excludedSideMask, out bool[] coreSupported)
         {
             var labels = CreateFilledIntArray(grid.Count, -1);
             var supported = new List<bool>();
@@ -2491,7 +3568,7 @@ namespace ArenaShooter
                     var current = queue.Dequeue();
                     var x = grid.CellX(current);
                     var y = grid.CellY(current);
-                    AccumulatePerimeterSupportContact(grid, x, y, ref perimeterContactLength, ref perimeterSideMask);
+                    AccumulatePerimeterSupportContact(grid, x, y, excludedSideMask, ref perimeterContactLength, ref perimeterSideMask);
                     QueueSupportCoreNeighbors(grid, labels, queue, x, y, label);
                 }
 
@@ -2506,28 +3583,29 @@ namespace ArenaShooter
             UnsupportedIslandScanGrid grid,
             int x,
             int y,
+            int excludedSideMask,
             ref float contactLength,
             ref int sideMask)
         {
-            if (x == 0)
+            if (x == 0 && (excludedSideMask & 1) == 0)
             {
                 contactLength += grid.StepV;
                 sideMask |= 1;
             }
 
-            if (x == grid.Columns - 1)
+            if (x == grid.Columns - 1 && (excludedSideMask & 2) == 0)
             {
                 contactLength += grid.StepV;
                 sideMask |= 2;
             }
 
-            if (y == 0)
+            if (y == 0 && (excludedSideMask & 4) == 0)
             {
                 contactLength += grid.StepU;
                 sideMask |= 4;
             }
 
-            if (y == grid.Rows - 1)
+            if (y == grid.Rows - 1 && (excludedSideMask & 8) == 0)
             {
                 contactLength += grid.StepU;
                 sideMask |= 8;
@@ -2766,7 +3844,7 @@ namespace ArenaShooter
             List<UnsupportedWallIsland> islands)
         {
             var thickness = GetContourOwnedWallContourThickness();
-            var rawSegments = BuildClippedVisibleContourSegments(bounds, thickness, false, false);
+            var rawSegments = BuildClippedVisibleContourSegments(bounds, thickness, false, false, 0f);
             if (rawSegments.Count == 0)
             {
                 return;
@@ -3732,7 +4810,7 @@ namespace ArenaShooter
             return points;
         }
 
-        private void SpawnContourOwnedWallHitSpray(DamageStamp stamp, Vector3 hitNormalWorld)
+        private void SpawnContourOwnedWallHitSpray(DamageStamp stamp, Vector3 hitNormalWorld, Vector3 shotDirectionWorld)
         {
             if (stamp == null || stamp.Points == null || stamp.Points.Length < 3)
             {
@@ -3765,9 +4843,13 @@ namespace ArenaShooter
                 min,
                 max,
                 area);
-            var sprayDirectionWorld = hitNormalWorld.sqrMagnitude > 0.0001f
-                ? -hitNormalWorld.normalized
-                : transform.TransformDirection(-stamp.Normal);
+            // Impact shards punch out along the projectile's actual path through the wall;
+            // the surface normal is only a fallback when no shot direction is known.
+            var sprayDirectionWorld = shotDirectionWorld.sqrMagnitude > 0.0001f
+                ? shotDirectionWorld.normalized
+                : hitNormalWorld.sqrMagnitude > 0.0001f
+                    ? -hitNormalWorld.normalized
+                    : transform.TransformDirection(-stamp.Normal);
             var budget = 1;
             SpawnWallMaterialSpray(
                 island,
@@ -3906,7 +4988,8 @@ namespace ArenaShooter
             Vector3 u,
             Vector3 v,
             float halfN,
-            ref int slabBudget)
+            ref int slabBudget,
+            Vector3? toppleDirectionWorld = null)
         {
             if (island == null ||
                 island.Points == null ||
@@ -4039,12 +5122,33 @@ namespace ArenaShooter
                 : CreateMesh("Falling Wall Slab Rim Mesh", rimVertices, new[] { rimTriangles });
             var seed = CalculateUnsupportedIslandSpraySeed(island, transform.TransformDirection(normal));
             var centerLocal = u * centroid.x + v * centroid.y;
-            var drift = transform.TransformDirection(normal) *
-                ((Hash01(seed ^ 0x9c7) > 0.5f ? 1f : -1f) * 0.55f);
-            var spawnOffset = drift.sqrMagnitude > 0.0001f
-                ? drift.normalized * (halfN * 2f + 0.03f)
-                : Vector3.zero;
-            SpawnFallingDebrisObject(mesh, colliderMesh, rimMesh, transform.TransformPoint(centerLocal), transform.rotation, seed, drift, spawnOffset);
+            Vector3 drift;
+            Vector3 spawnOffset;
+            if (toppleDirectionWorld.HasValue)
+            {
+                drift = toppleDirectionWorld.Value * 0.55f;
+                spawnOffset = toppleDirectionWorld.Value * 0.04f;
+            }
+            else if (pillarAxisSlabMode)
+            {
+                // Pillar pieces are a full pillar thickness deep; a random sideways shove can
+                // bury them inside an adjacent wall, so always fall toward the open side.
+                var awayFromWalls = ResolvePillarSlabToppleDirectionWorld();
+                drift = awayFromWalls * 0.55f;
+                spawnOffset = awayFromWalls * WallDebrisSpawnClearance;
+            }
+            else
+            {
+                // The piece's volume was freed before spawning, so it can detach in place
+                // instead of teleporting a full wall thickness sideways.
+                drift = transform.TransformDirection(normal) *
+                    ((Hash01(seed ^ 0x9c7) > 0.5f ? 1f : -1f) * 0.55f);
+                spawnOffset = drift.sqrMagnitude > 0.0001f
+                    ? drift.normalized * WallDebrisSpawnClearance
+                    : Vector3.zero;
+            }
+
+            SpawnFallingDebrisObject(mesh, colliderMesh, rimMesh, transform.TransformPoint(centerLocal), transform.rotation, seed, drift, spawnOffset, toppleDirectionWorld);
             slabBudget--;
         }
 
@@ -4062,7 +5166,8 @@ namespace ArenaShooter
             Quaternion worldRotation,
             int seed,
             Vector3 driftVelocityWorld,
-            Vector3 spawnOffsetWorld)
+            Vector3 spawnOffsetWorld,
+            Vector3? toppleDirectionWorld = null)
         {
             var slab = new GameObject("Falling Wall Slab");
             slab.transform.position = worldPosition + spawnOffsetWorld;
@@ -4099,16 +5204,458 @@ namespace ArenaShooter
             var kickScale = Mathf.Clamp(0.4f / Mathf.Max(0.1f, debrisFaceArea), 0.2f, 1.5f);
             body.mass = Mathf.Clamp(debrisFaceArea * 4f, 1f, 40f);
             body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-            var lateral = new Vector3(
-                Mathf.Lerp(-0.35f, 0.35f, Hash01(seed ^ 0x3d1)),
-                0f,
-                Mathf.Lerp(-0.35f, 0.35f, Hash01(seed ^ 0x77b)));
-            var tipAxis = Vector3.Cross(Vector3.up, lateral.sqrMagnitude > 0.0001f ? lateral.normalized : Vector3.forward);
-            var tipSpeed = Mathf.Lerp(18f, FallingSlabMaxTipDegreesPerSecond, Hash01(seed ^ 0x215)) *
-                (Hash01(seed ^ 0x6c2) > 0.5f ? 1f : -1f);
-            body.linearVelocity = (lateral + driftVelocityWorld) * kickScale;
-            body.angularVelocity = tipAxis * (tipSpeed * Mathf.Deg2Rad * kickScale);
+            if (toppleDirectionWorld.HasValue && toppleDirectionWorld.Value.sqrMagnitude > 0.0001f)
+            {
+                // A severed pillar section pivots over its base: spin about up x direction so the
+                // top leans toward the open side, with enough kick to clear the stump.
+                var topple = toppleDirectionWorld.Value.normalized;
+                var toppleAxis = Vector3.Cross(Vector3.up, topple);
+                var toppleSpeed = Mathf.Lerp(
+                    PillarToppleTipMinDegreesPerSecond,
+                    PillarToppleTipMaxDegreesPerSecond,
+                    Hash01(seed ^ 0x215));
+                body.linearVelocity = topple * PillarToppleKickSpeed;
+                body.angularVelocity = toppleAxis.sqrMagnitude > 0.0001f
+                    ? toppleAxis.normalized * (toppleSpeed * Mathf.Deg2Rad)
+                    : Vector3.zero;
+            }
+            else if (hasLastDamageImpulse)
+            {
+                // The piece detaches as dead weight; the only added motion is the shot's energy
+                // delivered as an impulse at the attachment point nearest the hit. Rigidbody
+                // mass and inertia then do the realistic part for free: heavy slabs barely
+                // react and drop straight down, light shards get visibly kicked and spun.
+                // The mass-scaled dislodge term pops small fragments clear of the wall.
+                body.linearVelocity = lastDamageShotDirectionWorld *
+                    Mathf.Min(WallDebrisDislodgeKick / body.mass, WallDebrisDislodgeKick);
+                body.angularVelocity = Vector3.zero;
+                if (Application.isPlaying)
+                {
+                    var impulse = lastDamageShotDirectionWorld *
+                        Mathf.Lerp(WallDebrisShotImpulseMin, WallDebrisShotImpulseMax, Hash01(seed ^ 0x5b3));
+                    body.AddForceAtPosition(impulse, slabCollider.ClosestPoint(lastDamageHitPointWorld), ForceMode.Impulse);
+                }
+            }
+            else
+            {
+                var lateral = new Vector3(
+                    Mathf.Lerp(-0.35f, 0.35f, Hash01(seed ^ 0x3d1)),
+                    0f,
+                    Mathf.Lerp(-0.35f, 0.35f, Hash01(seed ^ 0x77b)));
+                var tipAxis = Vector3.Cross(Vector3.up, lateral.sqrMagnitude > 0.0001f ? lateral.normalized : Vector3.forward);
+                var tipSpeed = Mathf.Lerp(18f, FallingSlabMaxTipDegreesPerSecond, Hash01(seed ^ 0x215)) *
+                    (Hash01(seed ^ 0x6c2) > 0.5f ? 1f : -1f);
+                body.linearVelocity = (lateral + driftVelocityWorld) * kickScale;
+                body.angularVelocity = tipAxis * (tipSpeed * Mathf.Deg2Rad * kickScale);
+            }
+
             slab.AddComponent<FallingWallSlabAnimation>().Initialize(FallingSlabLifetimeSeconds);
+            slab.AddComponent<FallingSlabImpactShatter>().Initialize(renderer.sharedMaterial, GetDamageContourMaterial(), outlineCategory, seed);
+        }
+
+        private static Mesh impactGlowMesh;
+
+        // Unit-radius horizontal disc with the footprint falloff mask baked into UV0.x
+        // (1 at the core, 0 at the rim); the spawner bakes the actual radius into the
+        // transform.
+        private static Mesh GetImpactGlowMesh()
+        {
+            if (impactGlowMesh != null)
+            {
+                return impactGlowMesh;
+            }
+
+            const int segments = 16;
+            var ringRadii = new[] { 0.45f, 0.75f, 1f };
+            var ringMasks = new[] { 1f, 0.45f, 0f };
+            BuildImpactGlowRingFan(
+                segments,
+                ringRadii,
+                ringMasks,
+                ringIndex => angleIndex => new Vector2(
+                    Mathf.Cos(angleIndex / (float)segments * Mathf.PI * 2f) * ringRadii[ringIndex],
+                    Mathf.Sin(angleIndex / (float)segments * Mathf.PI * 2f) * ringRadii[ringIndex]),
+                out var vertices,
+                out var normals,
+                out var uvs,
+                out var triangles);
+
+            impactGlowMesh = new Mesh
+            {
+                name = "Wall Debris Impact Glow Mesh",
+                vertices = vertices,
+                normals = normals,
+                uv = uvs,
+                triangles = triangles
+            };
+            return impactGlowMesh;
+        }
+
+        // Builds a center vertex plus concentric rings sharing one falloff mask in UV0.x,
+        // fanned/stitched into a watertight horizontal sheet.
+        private static void BuildImpactGlowRingFan(
+            int segments,
+            float[] ringRadii,
+            float[] ringMasks,
+            System.Func<int, System.Func<int, Vector2>> ringPointResolver,
+            out Vector3[] vertices,
+            out Vector3[] normals,
+            out Vector2[] uvs,
+            out int[] triangles)
+        {
+            var ringCount = ringRadii.Length;
+            vertices = new Vector3[1 + ringCount * segments];
+            normals = new Vector3[vertices.Length];
+            uvs = new Vector2[vertices.Length];
+            triangles = new int[segments * 3 + (ringCount - 1) * segments * 6];
+            vertices[0] = Vector3.zero;
+            normals[0] = Vector3.up;
+            uvs[0] = new Vector2(1f, 0f);
+            for (var ring = 0; ring < ringCount; ring++)
+            {
+                var resolvePoint = ringPointResolver(ring);
+                for (var i = 0; i < segments; i++)
+                {
+                    var point = resolvePoint(i);
+                    var index = 1 + ring * segments + i;
+                    vertices[index] = new Vector3(point.x, 0f, point.y);
+                    normals[index] = Vector3.up;
+                    uvs[index] = new Vector2(ringMasks[ring], 0f);
+                }
+            }
+
+            var triangleIndex = 0;
+            for (var i = 0; i < segments; i++)
+            {
+                triangles[triangleIndex++] = 0;
+                triangles[triangleIndex++] = 1 + (i + 1) % segments;
+                triangles[triangleIndex++] = 1 + i;
+            }
+
+            for (var ring = 0; ring < ringCount - 1; ring++)
+            {
+                var inner = 1 + ring * segments;
+                var outer = inner + segments;
+                for (var i = 0; i < segments; i++)
+                {
+                    var next = (i + 1) % segments;
+                    triangles[triangleIndex++] = inner + i;
+                    triangles[triangleIndex++] = outer + next;
+                    triangles[triangleIndex++] = outer + i;
+                    triangles[triangleIndex++] = inner + i;
+                    triangles[triangleIndex++] = inner + next;
+                    triangles[triangleIndex++] = outer + next;
+                }
+            }
+        }
+
+        private static Material CreateImpactGlowMaterial(Material floorHexMaterial)
+        {
+            var glowShader = Shader.Find("ArenaShooter/DebrisImpactGlow");
+            if (glowShader != null)
+            {
+                // The dedicated shader draws a translucent orange wash, the floor's red
+                // hex pattern (aligned via the floor material's own parameters), and a
+                // brief shockwave ripple — all dissolving through the falloff mask.
+                var glowMaterial = new Material(glowShader) { name = "Wall Debris Impact Glow Material" };
+                glowMaterial.SetColor("_GlowColor", DebrisImpactGlowColor);
+                var hexSize = 0.45f;
+                var hexLineWidth = 0.0035f;
+                var patternOrigin = Vector4.zero;
+                var hexLineColor = new Color(1f, 0.12f, 0.04f, 1f);
+                if (floorHexMaterial != null)
+                {
+                    hexSize = floorHexMaterial.GetFloat("_HexSize");
+                    patternOrigin = floorHexMaterial.GetVector("_PatternOrigin");
+                    if (floorHexMaterial.HasProperty("_LineWidth"))
+                    {
+                        hexLineWidth = floorHexMaterial.GetFloat("_LineWidth");
+                    }
+
+                    if (floorHexMaterial.HasProperty("_LineColor"))
+                    {
+                        hexLineColor = floorHexMaterial.GetColor("_LineColor");
+                    }
+                }
+
+                glowMaterial.SetFloat("_HexSize", hexSize);
+                // The floor's idle hairline is too thin to read inside a brief flash;
+                // beef the revealed lines up while keeping them clearly line-like.
+                glowMaterial.SetFloat("_LineWidth", Mathf.Clamp(hexLineWidth * 3f, 0.01f, 0.022f));
+                glowMaterial.SetVector("_PatternOrigin", patternOrigin);
+                glowMaterial.SetColor("_LineColor", hexLineColor);
+                return glowMaterial;
+            }
+
+            var shader = Shader.Find("Universal Render Pipeline/Unlit");
+            if (shader == null)
+            {
+                shader = Shader.Find("Unlit/Color");
+            }
+
+            // Fallback when the glow shader is missing: additive unlit color, animated
+            // toward black so it dissolves into the floor.
+            var material = new Material(shader) { name = "Wall Debris Impact Glow Material" };
+            SetMaterialColor(material, DebrisImpactGlowColor);
+            material.SetOverrideTag("RenderType", "Transparent");
+            if (material.HasProperty("_Surface"))
+            {
+                material.SetFloat("_Surface", 1f);
+            }
+
+            if (material.HasProperty("_SrcBlend"))
+            {
+                material.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.One);
+            }
+
+            if (material.HasProperty("_DstBlend"))
+            {
+                material.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.One);
+            }
+
+            if (material.HasProperty("_ZWrite"))
+            {
+                material.SetInt("_ZWrite", 0);
+            }
+
+            if (material.HasProperty("_Cull"))
+            {
+                material.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+            }
+
+            material.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+            return material;
+        }
+
+        // Projects the debris mesh onto the floor plane and builds its convex footprint
+        // as concentric rings around the impact point: a bright debris-shaped core that
+        // softly dissolves to nothing past the hull, via the falloff mask in UV0.x.
+        private static Mesh CreateImpactGlowFootprintMesh(
+            Mesh sourceMesh,
+            Transform sourceTransform,
+            Vector3 impactPoint,
+            out float footprintRadius)
+        {
+            footprintRadius = 0.45f;
+            if (sourceMesh == null || sourceTransform == null)
+            {
+                return null;
+            }
+
+            var sourceVertices = sourceMesh.vertices;
+            if (sourceVertices == null || sourceVertices.Length < 3)
+            {
+                return null;
+            }
+
+            var stride = Mathf.Max(1, sourceVertices.Length / 48);
+            var points = new List<Vector2>(sourceVertices.Length / stride + 1);
+            for (var i = 0; i < sourceVertices.Length; i += stride)
+            {
+                var world = sourceTransform.TransformPoint(sourceVertices[i]);
+                points.Add(new Vector2(world.x - impactPoint.x, world.z - impactPoint.z));
+            }
+
+            if (!TryBuildConvexHull(points, out var hull) || hull.Count < 3)
+            {
+                return null;
+            }
+
+            foreach (var point in hull)
+            {
+                footprintRadius = Mathf.Max(footprintRadius, point.magnitude);
+            }
+
+            var falloffMargin = Mathf.Clamp(footprintRadius * 0.85f, 0.3f, 1f);
+            var capturedRadius = footprintRadius;
+            var ringScales = new[] { 0.6f, 1f, -1f };
+            var ringMasks = new[] { 1f, 0.45f, 0f };
+            BuildImpactGlowRingFan(
+                hull.Count,
+                ringScales,
+                ringMasks,
+                ringIndex => angleIndex =>
+                {
+                    var point = hull[angleIndex];
+                    if (ringScales[ringIndex] >= 0f)
+                    {
+                        return point * ringScales[ringIndex];
+                    }
+
+                    // Outermost ring: pushed outward by the falloff margin so the fade
+                    // happens past the debris hull instead of eating into the core.
+                    var magnitude = point.magnitude;
+                    var direction = magnitude > 0.0001f
+                        ? point / magnitude
+                        : new Vector2(
+                            Mathf.Cos(angleIndex / (float)hull.Count * Mathf.PI * 2f),
+                            Mathf.Sin(angleIndex / (float)hull.Count * Mathf.PI * 2f));
+                    return point + direction * Mathf.Min(falloffMargin, capturedRadius);
+                },
+                out var vertices,
+                out var normals,
+                out var uvs,
+                out var triangles);
+
+            return new Mesh
+            {
+                name = "Wall Debris Impact Glow Footprint Mesh",
+                vertices = vertices,
+                normals = normals,
+                uv = uvs,
+                triangles = triangles
+            };
+        }
+
+        // Builds an irregular convex polygon extruded into a thin tapered plate — a
+        // glass-like shard — plus a matching neon edge-rim mesh outlining both faces.
+        private static Mesh CreateShatterShardMesh(int shardSeed, float radius, float thickness, out Mesh rimMesh)
+        {
+            var cornerCount = 4 + Mathf.FloorToInt(Hash01(shardSeed ^ 0x3f1) * 2.999f);
+            var halfThickness = Mathf.Max(0.004f, thickness * 0.5f);
+            var bottomScale = Mathf.Lerp(0.5f, 0.85f, Hash01(shardSeed ^ 0x5c3));
+            var top = new Vector2[cornerCount];
+            var bottom = new Vector2[cornerCount];
+            for (var i = 0; i < cornerCount; i++)
+            {
+                var angle = (i + Hash01(shardSeed ^ (i * 0x68b ^ 0x1cd)) * 0.55f) / cornerCount * Mathf.PI * 2f;
+                var cornerRadius = radius * Mathf.Lerp(0.55f, 1f, Hash01(shardSeed ^ (i * 0x2e5 ^ 0x7a9)));
+                top[i] = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * cornerRadius;
+                bottom[i] = top[i] * bottomScale;
+            }
+
+            var vertices = new List<Vector3>();
+            var triangles = new List<int>();
+            for (var i = 1; i < cornerCount - 1; i++)
+            {
+                AddShardTriangle(
+                    vertices,
+                    triangles,
+                    ShardPoint(top[0], halfThickness),
+                    ShardPoint(top[i], halfThickness),
+                    ShardPoint(top[i + 1], halfThickness),
+                    Vector3.up);
+                AddShardTriangle(
+                    vertices,
+                    triangles,
+                    ShardPoint(bottom[0], -halfThickness),
+                    ShardPoint(bottom[i], -halfThickness),
+                    ShardPoint(bottom[i + 1], -halfThickness),
+                    Vector3.down);
+            }
+
+            for (var i = 0; i < cornerCount; i++)
+            {
+                var next = (i + 1) % cornerCount;
+                var outward2D = (top[i] + top[next]) * 0.5f;
+                var outward = new Vector3(outward2D.x, 0f, outward2D.y);
+                if (outward.sqrMagnitude < 0.000001f)
+                {
+                    outward = Vector3.forward;
+                }
+
+                AddShardTriangle(
+                    vertices,
+                    triangles,
+                    ShardPoint(top[i], halfThickness),
+                    ShardPoint(top[next], halfThickness),
+                    ShardPoint(bottom[next], -halfThickness),
+                    outward);
+                AddShardTriangle(
+                    vertices,
+                    triangles,
+                    ShardPoint(top[i], halfThickness),
+                    ShardPoint(bottom[next], -halfThickness),
+                    ShardPoint(bottom[i], -halfThickness),
+                    outward);
+            }
+
+            var rimVertices = new List<Vector3>();
+            var rimTriangles = new List<int>();
+            var rimThickness = Mathf.Clamp(radius * 0.16f, 0.005f, 0.014f);
+            for (var i = 0; i < cornerCount; i++)
+            {
+                var next = (i + 1) % cornerCount;
+                AddShardRimSegment(
+                    rimVertices,
+                    rimTriangles,
+                    ShardPoint(top[i], halfThickness),
+                    ShardPoint(top[next], halfThickness),
+                    Vector3.up,
+                    rimThickness);
+                AddShardRimSegment(
+                    rimVertices,
+                    rimTriangles,
+                    ShardPoint(bottom[i], -halfThickness),
+                    ShardPoint(bottom[next], -halfThickness),
+                    Vector3.down,
+                    rimThickness);
+            }
+
+            rimMesh = rimVertices.Count == 0
+                ? null
+                : BuildShardMesh("Wall Debris Shatter Fragment Rim Mesh", rimVertices, rimTriangles);
+            return BuildShardMesh("Wall Debris Shatter Fragment Mesh", vertices, triangles);
+        }
+
+        private static Vector3 ShardPoint(Vector2 planar, float height)
+        {
+            return new Vector3(planar.x, height, planar.y);
+        }
+
+        private static Mesh BuildShardMesh(string meshName, List<Vector3> vertices, List<int> triangles)
+        {
+            var mesh = new Mesh { name = meshName };
+            mesh.SetVertices(vertices);
+            mesh.SetTriangles(triangles, 0);
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        private static void AddShardTriangle(List<Vector3> vertices, List<int> triangles, Vector3 a, Vector3 b, Vector3 c, Vector3 outward)
+        {
+            var index = vertices.Count;
+            vertices.Add(a);
+            vertices.Add(b);
+            vertices.Add(c);
+            var normal = Vector3.Cross(b - a, c - a);
+            if (Vector3.Dot(normal, outward) >= 0f)
+            {
+                triangles.Add(index);
+                triangles.Add(index + 1);
+                triangles.Add(index + 2);
+                return;
+            }
+
+            triangles.Add(index);
+            triangles.Add(index + 2);
+            triangles.Add(index + 1);
+        }
+
+        // Double-sided thin quad centered on a shard edge, mirroring the parent slab's
+        // contour rim segments at fragment scale.
+        private static void AddShardRimSegment(List<Vector3> vertices, List<int> triangles, Vector3 start, Vector3 end, Vector3 normal, float thickness)
+        {
+            var direction = end - start;
+            if (direction.sqrMagnitude <= 0.000001f)
+            {
+                return;
+            }
+
+            direction.Normalize();
+            var side = Vector3.Cross(normal, direction);
+            if (side.sqrMagnitude <= 0.000001f)
+            {
+                return;
+            }
+
+            side.Normalize();
+            var halfWidth = side * (thickness * 0.5f);
+            AddShardTriangle(vertices, triangles, start - halfWidth, end - halfWidth, end + halfWidth, normal);
+            AddShardTriangle(vertices, triangles, start - halfWidth, end + halfWidth, start + halfWidth, normal);
+            AddShardTriangle(vertices, triangles, start - halfWidth, end + halfWidth, end - halfWidth, -normal);
+            AddShardTriangle(vertices, triangles, start - halfWidth, start + halfWidth, end + halfWidth, -normal);
         }
 
         private static PhysicsMaterial fallingDebrisPhysicsMaterial;
@@ -4213,7 +5760,9 @@ namespace ArenaShooter
             float halfN,
             float radiusU,
             float radiusV,
-            int seed)
+            int seed,
+            Vector2 shearPerDepth,
+            DamageComponentPlaneBounds clampBounds)
         {
             var points = new Vector2[DamageStampSegments];
             var min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
@@ -4238,6 +5787,13 @@ namespace ArenaShooter
                 max = Vector2.Max(max, point);
             }
 
+            // Pillar slab polygons may overflow the box edge: the sibling slab clips against
+            // them (dual-basis shader), so a corner bite consumes both faces. The exit offset
+            // stays clamped to the piece bounds for everything, otherwise sheared rim and
+            // tunnel geometry trails up to a meter past the visible faces.
+            var thickness = halfN * 2f;
+            var exitOffset = ClampStampExitOffsetToBounds(shearPerDepth * thickness, min, max, clampBounds);
+            var effectiveShear = thickness > 0.0001f ? exitOffset / thickness : Vector2.zero;
             var stamp = new DamageStamp
             {
                 Normal = normal,
@@ -4246,24 +5802,41 @@ namespace ArenaShooter
                 Plane = halfN + DamageContourInset,
                 Min = min,
                 Max = max,
-                Points = points
+                Points = points,
+                ShearPerDepth = effectiveShear,
+                MidDepthOffset = exitOffset * 0.5f
             };
             stamp.Opposite = CreateOppositeContourOwnedWallStamp(stamp, normal, halfN);
             return stamp;
         }
 
+        private static Vector2 ClampStampExitOffsetToBounds(Vector2 offset, Vector2 min, Vector2 max, DamageComponentPlaneBounds bounds)
+        {
+            // Keep the exit polygon from sliding past the piece bounds while always allowing a
+            // straight (zero offset) tunnel even when the entry polygon already crosses an edge.
+            var lowX = Mathf.Min(0f, bounds.MinU - min.x);
+            var highX = Mathf.Max(0f, bounds.MaxU - max.x);
+            var lowY = Mathf.Min(0f, bounds.MinV - min.y);
+            var highY = Mathf.Max(0f, bounds.MaxV - max.y);
+            return new Vector2(Mathf.Clamp(offset.x, lowX, highX), Mathf.Clamp(offset.y, lowY, highY));
+        }
+
         private static DamageStamp CreateOppositeContourOwnedWallStamp(DamageStamp source, Vector3 normal, float halfN)
         {
+            var exitOffset = source.ShearPerDepth * (halfN * 2f);
             var opposite = new DamageStamp
             {
                 Normal = -normal,
                 U = source.U,
                 V = source.V,
                 Plane = halfN + DamageContourInset,
-                Min = source.Min,
-                Max = source.Max,
+                Min = source.Min + exitOffset,
+                Max = source.Max + exitOffset,
                 Points = source.Points,
-                RenderClosed = source.RenderClosed
+                RenderClosed = source.RenderClosed,
+                ShearPerDepth = source.ShearPerDepth,
+                UvOffset = exitOffset,
+                MidDepthOffset = source.MidDepthOffset
             };
             opposite.Opposite = source;
             return opposite;
@@ -4311,16 +5884,145 @@ namespace ArenaShooter
             return false;
         }
 
+        // A (u,v) column only counts as empty when the hole union covers it at the front, the
+        // middle, and the back of the material. Sheared tunnels leave partial-depth wedges (a
+        // face plus interior wall with no opposite face); sampling a single depth made those
+        // invisible to every structural pass, so they lingered as phantom shards.
+        private bool IsPointInsideWallDamageUnionThroughDepth(Vector2 point)
+        {
+            if (!scanStampsHaveShear)
+            {
+                // Straight tunnels are identical at every depth; skip the two extra passes.
+                return IsPointInsideWallDamageUnionAtHalfDepthSteps(point, 0);
+            }
+
+            return IsPointInsideWallDamageUnionAtHalfDepthSteps(point, 0) &&
+                IsPointInsideWallDamageUnionAtHalfDepthSteps(point, 1) &&
+                IsPointInsideWallDamageUnionAtHalfDepthSteps(point, 2);
+        }
+
+        private bool CalculateWallDamageStampsHaveShear()
+        {
+            for (var i = 0; i < wallDamageStamps.Count; i++)
+            {
+                var stamp = wallDamageStamps[i];
+                if (stamp != null && stamp.MidDepthOffset.sqrMagnitude > 0.00000001f)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool IsPointInsideWallDamageUnionAtHalfDepthSteps(Vector2 point, int halfDepthSteps)
+        {
+            for (var i = 0; i < wallDamageStamps.Count; i++)
+            {
+                var stamp = wallDamageStamps[i];
+                if (stamp == null)
+                {
+                    continue;
+                }
+
+                var corrected = point - stamp.MidDepthOffset * halfDepthSteps;
+                if (corrected.x >= stamp.Min.x &&
+                    corrected.x <= stamp.Max.x &&
+                    corrected.y >= stamp.Min.y &&
+                    corrected.y <= stamp.Max.y &&
+                    IsPointInPolygon(corrected, stamp.Points))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool IsLocalPointInsideWallDamageUnion(Vector3 localPoint)
+        {
+            if (!TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out _))
+            {
+                return false;
+            }
+
+            var uv = new Vector2(Vector3.Dot(localPoint, u), Vector3.Dot(localPoint, v));
+            var depth = halfN - Vector3.Dot(localPoint, normal);
+            for (var i = 0; i < wallDamageStamps.Count; i++)
+            {
+                var stamp = wallDamageStamps[i];
+                if (stamp == null)
+                {
+                    continue;
+                }
+
+                var corrected = uv - stamp.ShearPerDepth * depth;
+                if (corrected.x >= stamp.Min.x &&
+                    corrected.x <= stamp.Max.x &&
+                    corrected.y >= stamp.Min.y &&
+                    corrected.y <= stamp.Max.y &&
+                    IsPointInPolygon(corrected, stamp.Points))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private void UploadWallDamageShaderData()
         {
             if (!UsesContourOwnedWallDamage() ||
-                !TryGetContourOwnedWallBasis(0f, out _, out var u, out var v, out _, out _))
+                !TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out _))
             {
                 return;
             }
 
-            var stampCount = wallDamageStamps.Count;
-            var pointCount = CalculateWallDamageStampPointCount();
+            // A pillar axis slab also clips against its sibling's stamps (flagged into the
+            // secondary basis) so a hole reaching the shared box corner bites both faces.
+            List<DamageStamp> siblingStamps = null;
+            var siblingNormal = Vector3.zero;
+            var siblingU = Vector3.zero;
+            var siblingV = Vector3.zero;
+            var siblingHalfN = 0f;
+            if (pillarAxisSlabMode &&
+                structuralFallSibling != null &&
+                structuralFallSibling.wallDamageStamps.Count > 0 &&
+                structuralFallSibling.TryGetContourOwnedWallBasis(0f, out siblingNormal, out siblingU, out siblingV, out siblingHalfN, out _))
+            {
+                siblingStamps = structuralFallSibling.wallDamageStamps;
+            }
+
+            var ownCount = wallDamageStamps.Count;
+            var siblingCount = siblingStamps?.Count ?? 0;
+            var stampCount = ownCount + siblingCount;
+            if (stampCount == 0)
+            {
+                // Renderers must still get a property block with bound (dummy) buffers — the
+                // clip shaders drop their draws when the declared buffers are left unbound.
+                // One shared static set serves every undamaged piece, so arena generation
+                // stays free of per-piece GPU allocations.
+                EnsureSharedEmptyWallDamageBuffers();
+                ApplyWallDamagePropertyBlock(
+                    combinedRenderer, 0, u, v, normal, halfN, Vector4.zero, Vector4.zero, Vector4.zero,
+                    sharedEmptyStampBoundsBuffer, sharedEmptyStampPointOffsetsBuffer, sharedEmptyStampPointCountsBuffer, sharedEmptyStampPointsBuffer, sharedEmptyStampShearsBuffer);
+                ApplyWallDamagePropertyBlock(
+                    outlineSourceRenderer, 0, u, v, normal, halfN, Vector4.zero, Vector4.zero, Vector4.zero,
+                    sharedEmptyStampBoundsBuffer, sharedEmptyStampPointOffsetsBuffer, sharedEmptyStampPointCountsBuffer, sharedEmptyStampPointsBuffer, sharedEmptyStampShearsBuffer);
+                return;
+            }
+
+            var pointCount = 0;
+            for (var i = 0; i < ownCount; i++)
+            {
+                pointCount += wallDamageStamps[i]?.Points?.Length ?? 0;
+            }
+
+            for (var i = 0; i < siblingCount; i++)
+            {
+                pointCount += siblingStamps[i]?.Points?.Length ?? 0;
+            }
+
             EnsureWallDamageShaderBufferCapacity(
                 Mathf.Max(1, stampCount),
                 Mathf.Max(1, pointCount));
@@ -4328,13 +6030,16 @@ namespace ArenaShooter
             var stampBounds = new Vector4[Mathf.Max(1, stampCount)];
             var stampPointOffsets = new int[Mathf.Max(1, stampCount)];
             var stampPointCounts = new int[Mathf.Max(1, stampCount)];
+            var stampShears = new Vector4[Mathf.Max(1, stampCount)];
             var stampPoints = new Vector4[Mathf.Max(1, pointCount)];
             var pointOffset = 0;
             for (var stampIndex = 0; stampIndex < stampCount; stampIndex++)
             {
-                var stamp = wallDamageStamps[stampIndex];
+                var fromSibling = stampIndex >= ownCount;
+                var stamp = fromSibling ? siblingStamps[stampIndex - ownCount] : wallDamageStamps[stampIndex];
                 stampBounds[stampIndex] = new Vector4(stamp.Min.x, stamp.Min.y, stamp.Max.x, stamp.Max.y);
                 stampPointOffsets[stampIndex] = pointOffset;
+                stampShears[stampIndex] = new Vector4(stamp.ShearPerDepth.x, stamp.ShearPerDepth.y, fromSibling ? 1f : 0f, 0f);
                 var points = stamp.Points;
                 var count = points != null ? points.Length : 0;
                 stampPointCounts[stampIndex] = count;
@@ -4350,9 +6055,59 @@ namespace ArenaShooter
             wallDamageStampBoundsBuffer.SetData(stampBounds);
             wallDamageStampPointOffsetsBuffer.SetData(stampPointOffsets);
             wallDamageStampPointCountsBuffer.SetData(stampPointCounts);
+            wallDamageStampShearsBuffer.SetData(stampShears);
             wallDamageStampPointsBuffer.SetData(stampPoints);
-            ApplyWallDamagePropertyBlock(combinedRenderer, stampCount, u, v);
-            ApplyWallDamagePropertyBlock(outlineSourceRenderer, stampCount, u, v);
+            var secondaryU = new Vector4(siblingU.x, siblingU.y, siblingU.z, 0f);
+            var secondaryV = new Vector4(siblingV.x, siblingV.y, siblingV.z, 0f);
+            var secondaryN = new Vector4(siblingNormal.x, siblingNormal.y, siblingNormal.z, siblingHalfN);
+            ApplyWallDamagePropertyBlock(
+                combinedRenderer, stampCount, u, v, normal, halfN, secondaryU, secondaryV, secondaryN,
+                wallDamageStampBoundsBuffer, wallDamageStampPointOffsetsBuffer, wallDamageStampPointCountsBuffer, wallDamageStampPointsBuffer, wallDamageStampShearsBuffer);
+            ApplyWallDamagePropertyBlock(
+                outlineSourceRenderer, stampCount, u, v, normal, halfN, secondaryU, secondaryV, secondaryN,
+                wallDamageStampBoundsBuffer, wallDamageStampPointOffsetsBuffer, wallDamageStampPointCountsBuffer, wallDamageStampPointsBuffer, wallDamageStampShearsBuffer);
+        }
+
+        private static ComputeBuffer sharedEmptyStampBoundsBuffer;
+        private static ComputeBuffer sharedEmptyStampPointsBuffer;
+        private static ComputeBuffer sharedEmptyStampPointOffsetsBuffer;
+        private static ComputeBuffer sharedEmptyStampPointCountsBuffer;
+        private static ComputeBuffer sharedEmptyStampShearsBuffer;
+
+        private static void EnsureSharedEmptyWallDamageBuffers()
+        {
+            if (sharedEmptyStampBoundsBuffer != null)
+            {
+                return;
+            }
+
+            sharedEmptyStampBoundsBuffer = new ComputeBuffer(1, sizeof(float) * 4);
+            sharedEmptyStampPointsBuffer = new ComputeBuffer(1, sizeof(float) * 4);
+            sharedEmptyStampPointOffsetsBuffer = new ComputeBuffer(1, sizeof(int));
+            sharedEmptyStampPointCountsBuffer = new ComputeBuffer(1, sizeof(int));
+            sharedEmptyStampShearsBuffer = new ComputeBuffer(1, sizeof(float) * 4);
+            Application.quitting += ReleaseSharedEmptyWallDamageBuffers;
+#if UNITY_EDITOR
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += ReleaseSharedEmptyWallDamageBuffers;
+#endif
+        }
+
+        private static void ReleaseSharedEmptyWallDamageBuffers()
+        {
+            Application.quitting -= ReleaseSharedEmptyWallDamageBuffers;
+#if UNITY_EDITOR
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload -= ReleaseSharedEmptyWallDamageBuffers;
+#endif
+            sharedEmptyStampBoundsBuffer?.Release();
+            sharedEmptyStampBoundsBuffer = null;
+            sharedEmptyStampPointsBuffer?.Release();
+            sharedEmptyStampPointsBuffer = null;
+            sharedEmptyStampPointOffsetsBuffer?.Release();
+            sharedEmptyStampPointOffsetsBuffer = null;
+            sharedEmptyStampPointCountsBuffer?.Release();
+            sharedEmptyStampPointCountsBuffer = null;
+            sharedEmptyStampShearsBuffer?.Release();
+            sharedEmptyStampShearsBuffer = null;
         }
 
         private int CalculateWallDamageStampPointCount()
@@ -4395,9 +6150,30 @@ namespace ArenaShooter
                 wallDamageStampPointsCapacity = Mathf.Max(1, pointCapacity);
                 wallDamageStampPointsBuffer = new ComputeBuffer(wallDamageStampPointsCapacity, sizeof(float) * 4);
             }
+
+            if (wallDamageStampShearsBuffer == null || wallDamageStampShearsCapacity < stampCapacity)
+            {
+                wallDamageStampShearsBuffer?.Release();
+                wallDamageStampShearsCapacity = Mathf.Max(1, stampCapacity);
+                wallDamageStampShearsBuffer = new ComputeBuffer(wallDamageStampShearsCapacity, sizeof(float) * 4);
+            }
         }
 
-        private void ApplyWallDamagePropertyBlock(Renderer renderer, int stampCount, Vector3 u, Vector3 v)
+        private void ApplyWallDamagePropertyBlock(
+            Renderer renderer,
+            int stampCount,
+            Vector3 u,
+            Vector3 v,
+            Vector3 normal,
+            float halfN,
+            Vector4 secondaryU,
+            Vector4 secondaryV,
+            Vector4 secondaryN,
+            ComputeBuffer boundsBuffer,
+            ComputeBuffer pointOffsetsBuffer,
+            ComputeBuffer pointCountsBuffer,
+            ComputeBuffer pointsBuffer,
+            ComputeBuffer shearsBuffer)
         {
             if (renderer == null)
             {
@@ -4410,10 +6186,15 @@ namespace ArenaShooter
             wallDamagePropertyBlock.SetInt(WallDamageStampCountId, stampCount);
             wallDamagePropertyBlock.SetVector(WallDamageUId, new Vector4(u.x, u.y, u.z, 0f));
             wallDamagePropertyBlock.SetVector(WallDamageVId, new Vector4(v.x, v.y, v.z, 0f));
-            wallDamagePropertyBlock.SetBuffer(WallDamageStampBoundsId, wallDamageStampBoundsBuffer);
-            wallDamagePropertyBlock.SetBuffer(WallDamageStampPointOffsetsId, wallDamageStampPointOffsetsBuffer);
-            wallDamagePropertyBlock.SetBuffer(WallDamageStampPointCountsId, wallDamageStampPointCountsBuffer);
-            wallDamagePropertyBlock.SetBuffer(WallDamageStampPointsId, wallDamageStampPointsBuffer);
+            wallDamagePropertyBlock.SetVector(WallDamageNId, new Vector4(normal.x, normal.y, normal.z, halfN));
+            wallDamagePropertyBlock.SetVector(WallDamageU2Id, secondaryU);
+            wallDamagePropertyBlock.SetVector(WallDamageV2Id, secondaryV);
+            wallDamagePropertyBlock.SetVector(WallDamageN2Id, secondaryN);
+            wallDamagePropertyBlock.SetBuffer(WallDamageStampBoundsId, boundsBuffer);
+            wallDamagePropertyBlock.SetBuffer(WallDamageStampPointOffsetsId, pointOffsetsBuffer);
+            wallDamagePropertyBlock.SetBuffer(WallDamageStampPointCountsId, pointCountsBuffer);
+            wallDamagePropertyBlock.SetBuffer(WallDamageStampPointsId, pointsBuffer);
+            wallDamagePropertyBlock.SetBuffer(WallDamageStampShearsId, shearsBuffer);
             renderer.SetPropertyBlock(wallDamagePropertyBlock);
         }
 
@@ -4434,6 +6215,10 @@ namespace ArenaShooter
             wallDamageStampPointsBuffer?.Release();
             wallDamageStampPointsBuffer = null;
             wallDamageStampPointsCapacity = 0;
+
+            wallDamageStampShearsBuffer?.Release();
+            wallDamageStampShearsBuffer = null;
+            wallDamageStampShearsCapacity = 0;
         }
 
         private void RebuildContourOwnedWallMesh()
@@ -4444,13 +6229,10 @@ namespace ArenaShooter
 
             var thickness = GetContourOwnedWallContourThickness();
             var visibleSegments = GetVisibleContourOwnedWallSegments(thickness);
-            var bridgeSegments = GetContourOwnedWallBridgeSegments(thickness);
+            var backSegments = GetVisibleContourOwnedWallBackSegments(thickness);
             var bridgeVertices = new List<Vector3>();
             var bridgeTriangles = new List<int>();
-            if (bridgeSegments.Count > 0)
-            {
-                AddContourInteriorBridge(bridgeVertices, bridgeTriangles, bridgeSegments);
-            }
+            AddSlicedContourInteriorBridge(bridgeVertices, bridgeTriangles, thickness);
 
             combinedMeshFilter.sharedMesh = CreateMesh("Combined Destructible Wall Mesh", vertices, new[] { slabTriangles });
             if (combinedRenderer != null)
@@ -4467,9 +6249,19 @@ namespace ArenaShooter
                 : CreateMesh("Destructible Wall Interior Bridge Mesh", bridgeVertices, new[] { bridgeTriangles });
 
             RebuildOutlineSourceMesh();
-            RebuildContourOwnedWallDamageContourMesh(visibleSegments);
+            RebuildContourOwnedWallDamageContourMesh(visibleSegments, backSegments);
             RebuildSurvivingColliders();
             UploadWallDamageShaderData();
+            if (pillarAxisSlabMode)
+            {
+                if (pillarRouterPiece != null)
+                {
+                    pillarRouterPiece.RebuildPillarRouterColliders();
+                }
+
+                // The sibling clips against this slab's stamps too, so refresh its shader data.
+                structuralFallSibling?.UploadWallDamageShaderData();
+            }
         }
 
         private sealed class SurvivingColliderRun
@@ -4485,13 +6277,13 @@ namespace ArenaShooter
             if (suppressSurvivingColliders ||
                 surfaceCollider == null ||
                 wallDamageStamps.Count == 0 ||
-                !TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out var bounds))
+                !TryGetContourOwnedWallBasis(0f, out var normal, out var u, out var v, out var halfN, out _))
             {
                 return;
             }
 
-            var grid = BuildUnsupportedIslandScanGrid(bounds);
-            if (grid.Count == 0)
+            var rects = CollectSurvivingColliderRects();
+            if (rects == null)
             {
                 return;
             }
@@ -4516,6 +6308,32 @@ namespace ArenaShooter
             }
 
             surfaceCollider.enabled = false;
+            for (var i = 0; i < rects.Count; i++)
+            {
+                var rect = rects[i];
+                var box = survivingColliderRoot.AddComponent<BoxCollider>();
+                box.center = u * ((rect.x + rect.z) * 0.5f) + v * ((rect.y + rect.w) * 0.5f);
+                box.size = AbsVector(u) * (rect.z - rect.x) + AbsVector(v) * (rect.w - rect.y) + AbsVector(normal) * (halfN * 2f);
+            }
+        }
+
+        // Returns surviving material rectangles as (minU, minV, maxU, maxV) in the wall plane,
+        // or null while the piece is still undamaged (callers treat null as the full box).
+        private List<Vector4> CollectSurvivingColliderRects()
+        {
+            if (wallDamageStamps.Count == 0 ||
+                !TryGetContourOwnedWallBasis(0f, out _, out _, out _, out _, out var bounds))
+            {
+                return null;
+            }
+
+            var grid = BuildUnsupportedIslandScanGrid(bounds);
+            if (grid.Count == 0)
+            {
+                return null;
+            }
+
+            var rects = new List<Vector4>();
             var activeBoxes = new List<SurvivingColliderRun>();
             var columnRuns = new List<Vector2Int>();
             for (var x = 0; x <= grid.Columns; x++)
@@ -4556,7 +6374,7 @@ namespace ArenaShooter
 
                     if (!continued)
                     {
-                        EmitSurvivingBoxCollider(box, grid, bounds, u, v, normal, halfN);
+                        rects.Add(CreateSurvivingColliderRect(box, grid, bounds));
                         activeBoxes.RemoveAt(i);
                     }
                 }
@@ -4572,24 +6390,20 @@ namespace ArenaShooter
                     });
                 }
             }
+
+            return rects;
         }
 
-        private void EmitSurvivingBoxCollider(
+        private static Vector4 CreateSurvivingColliderRect(
             SurvivingColliderRun run,
             UnsupportedIslandScanGrid grid,
-            DamageComponentPlaneBounds bounds,
-            Vector3 u,
-            Vector3 v,
-            Vector3 normal,
-            float halfN)
+            DamageComponentPlaneBounds bounds)
         {
-            var minU = bounds.MinU + run.StartColumn * grid.StepU;
-            var maxU = bounds.MinU + (run.EndColumn + 1) * grid.StepU;
-            var minV = bounds.MinV + run.RowStart * grid.StepV;
-            var maxV = bounds.MinV + (run.RowEnd + 1) * grid.StepV;
-            var box = survivingColliderRoot.AddComponent<BoxCollider>();
-            box.center = u * ((minU + maxU) * 0.5f) + v * ((minV + maxV) * 0.5f);
-            box.size = AbsVector(u) * (maxU - minU) + AbsVector(v) * (maxV - minV) + AbsVector(normal) * (halfN * 2f);
+            return new Vector4(
+                bounds.MinU + run.StartColumn * grid.StepU,
+                bounds.MinV + run.RowStart * grid.StepV,
+                bounds.MinU + (run.EndColumn + 1) * grid.StepU,
+                bounds.MinV + (run.RowEnd + 1) * grid.StepV);
         }
 
         private void EnsureInteriorBridgeObject()
@@ -4607,14 +6421,16 @@ namespace ArenaShooter
             DroidRenderSetup.ApplyRenderer(interiorBridgeRenderer, StylizedOutlineCategory.None);
         }
 
-        private void RebuildContourOwnedWallDamageContourMesh(List<ContourSegment2D> visibleSegments)
+        private void RebuildContourOwnedWallDamageContourMesh(List<ContourSegment2D> visibleSegments, List<ContourSegment2D> backSegments)
         {
             if (damageContourMeshFilter == null)
             {
                 return;
             }
 
-            if (!UsesContourOwnedWallDamage() || visibleSegments == null || visibleSegments.Count == 0)
+            var hasFront = visibleSegments != null && visibleSegments.Count > 0;
+            var hasBack = backSegments != null && backSegments.Count > 0;
+            if (!UsesContourOwnedWallDamage() || (!hasFront && !hasBack))
             {
                 damageContourMeshFilter.sharedMesh = null;
                 return;
@@ -4622,14 +6438,24 @@ namespace ArenaShooter
 
             var vertices = new List<Vector3>();
             var triangles = new List<int>();
-            AddContourOwnedWallDamageRimSegments(vertices, triangles, visibleSegments);
+            AddContourOwnedWallDamageRimSegments(vertices, triangles, visibleSegments, backSegments);
             damageContourMeshFilter.sharedMesh = vertices.Count == 0
                 ? null
                 : CreateMesh("Destructible Wall Damage Contour Mesh", vertices, new[] { triangles });
         }
 
-        private void AddContourOwnedWallDamageRimSegments(List<Vector3> vertices, List<int> triangles, List<ContourSegment2D> visibleSegments)
+        private void AddContourOwnedWallDamageRimSegments(
+            List<Vector3> vertices,
+            List<int> triangles,
+            List<ContourSegment2D> visibleSegments,
+            List<ContourSegment2D> backSegments)
         {
+            if (!TryGetContourOwnedWallBasis(0f, out _, out _, out _, out _, out var bounds))
+            {
+                return;
+            }
+
+            var sliceCount = CalculateTunnelBridgeSliceCount();
             for (var i = 0; i < visibleSegments.Count; i++)
             {
                 var segment = visibleSegments[i];
@@ -4646,10 +6472,16 @@ namespace ArenaShooter
                     segment.Stamp.Normal,
                     WallDamageRimThickness);
 
-                AddThroughThicknessDamageRimSegment(vertices, triangles, segment, segment.Start, segment.End);
-                AddThroughThicknessDamageRimSegment(vertices, triangles, segment, segment.End, segment.Start);
+                AddThroughThicknessDamageRimSegment(vertices, triangles, segment, segment.Start, segment.End, bounds, sliceCount);
+                AddThroughThicknessDamageRimSegment(vertices, triangles, segment, segment.End, segment.Start, bounds, sliceCount);
+            }
 
-                var opposite = segment.Stamp.Opposite;
+            // The back-face ring uses its own union: segment points are already in the back
+            // face's world UV (front polygon plus each tunnel's exit offset).
+            for (var i = 0; i < backSegments.Count; i++)
+            {
+                var segment = backSegments[i];
+                var opposite = segment.Stamp != null ? segment.Stamp.Opposite : null;
                 if (opposite == null)
                 {
                     continue;
@@ -4658,8 +6490,8 @@ namespace ArenaShooter
                 AddSingleSidedContourSegment(
                     vertices,
                     triangles,
-                    DamageStampPointToLocal(opposite, segment.Start, WallDamageRimDepthBias),
-                    DamageStampPointToLocal(opposite, segment.End, WallDamageRimDepthBias),
+                    DamageStampWorldPointToLocal(opposite, segment.Start, WallDamageRimDepthBias),
+                    DamageStampWorldPointToLocal(opposite, segment.End, WallDamageRimDepthBias),
                     opposite.Normal,
                     WallDamageRimThickness);
             }
@@ -4670,7 +6502,9 @@ namespace ArenaShooter
             List<int> triangles,
             ContourSegment2D segment,
             Vector2 point,
-            Vector2 tangentPoint)
+            Vector2 tangentPoint,
+            DamageComponentPlaneBounds bounds,
+            int sliceCount)
         {
             var stamp = segment.Stamp;
             var opposite = stamp != null ? stamp.Opposite : null;
@@ -4688,26 +6522,79 @@ namespace ArenaShooter
 
             tangent.Normalize();
             var halfWidth = tangent * (WallDamageRimThickness * 0.5f);
-            var front = DamageStampPointToLocal(stamp, point, WallDamageRimDepthBias);
-            var back = DamageStampPointToLocal(opposite, point, WallDamageRimDepthBias);
-            var through = back - front;
-            if (through.sqrMagnitude <= 0.000001f)
+            var wallDepth = (stamp.Plane - DamageContourInset) * 2f;
+            if (wallDepth <= 0.0001f)
             {
                 return;
             }
 
-            var outward = Vector3.Cross(through, halfWidth);
-            if (outward.sqrMagnitude <= 0.000001f)
+            // Draw the strip in depth slices and drop the parts that run through another
+            // tunnel or slide past the piece bounds, so merged holes do not get stray rim
+            // lines crossing their openings or trailing outside the visible faces.
+            for (var slice = 0; slice < sliceCount; slice++)
             {
-                outward = stamp.Normal;
+                var depthNear = wallDepth * slice / sliceCount;
+                var depthFar = wallDepth * (slice + 1) / sliceCount;
+                var depthMid = (depthNear + depthFar) * 0.5f;
+                var midUv = point + stamp.ShearPerDepth * depthMid;
+                if (midUv.x < bounds.MinU - 0.01f ||
+                    midUv.x > bounds.MaxU + 0.01f ||
+                    midUv.y < bounds.MinV - 0.01f ||
+                    midUv.y > bounds.MaxV + 0.01f)
+                {
+                    continue;
+                }
+
+                if (IsWorldUvInsideOtherStampAtDepth(midUv, stamp, depthMid))
+                {
+                    continue;
+                }
+
+                var near = TunnelWorldUvToLocal(stamp, point + stamp.ShearPerDepth * depthNear, depthNear, wallDepth);
+                var far = TunnelWorldUvToLocal(stamp, point + stamp.ShearPerDepth * depthFar, depthFar, wallDepth);
+                var through = far - near;
+                if (through.sqrMagnitude <= 0.000001f)
+                {
+                    continue;
+                }
+
+                var outward = Vector3.Cross(through, halfWidth);
+                if (outward.sqrMagnitude <= 0.000001f)
+                {
+                    outward = stamp.Normal;
+                }
+                else
+                {
+                    outward.Normalize();
+                }
+
+                AddQuadOriented(vertices, triangles, near - halfWidth, far - halfWidth, far + halfWidth, near + halfWidth, outward);
+                AddQuadOriented(vertices, triangles, near - halfWidth, near + halfWidth, far + halfWidth, far - halfWidth, -outward);
             }
-            else
+        }
+
+        private bool IsWorldUvInsideOtherStampAtDepth(Vector2 worldUv, DamageStamp owner, float depth)
+        {
+            for (var i = 0; i < wallDamageStamps.Count; i++)
             {
-                outward.Normalize();
+                var stamp = wallDamageStamps[i];
+                if (stamp == null || stamp == owner)
+                {
+                    continue;
+                }
+
+                var corrected = worldUv - stamp.ShearPerDepth * depth;
+                if (corrected.x >= stamp.Min.x &&
+                    corrected.x <= stamp.Max.x &&
+                    corrected.y >= stamp.Min.y &&
+                    corrected.y <= stamp.Max.y &&
+                    IsPointInPolygon(corrected, stamp.Points))
+                {
+                    return true;
+                }
             }
 
-            AddQuadOriented(vertices, triangles, front - halfWidth, back - halfWidth, back + halfWidth, front + halfWidth, outward);
-            AddQuadOriented(vertices, triangles, front - halfWidth, front + halfWidth, back + halfWidth, back - halfWidth, -outward);
+            return false;
         }
 
         private void AddContourOwnedWallBodyGeometry(List<Vector3> vertices, List<int> triangles, float shellInflation)
@@ -4839,10 +6726,29 @@ namespace ArenaShooter
         {
             AddContourOwnedWallPlaneQuad(vertices, triangles, normal, u, v, halfN, bounds.MinU, bounds.MaxU, bounds.MinV, bounds.MaxV);
             AddContourOwnedWallPlaneQuad(vertices, triangles, -normal, u, v, halfN, bounds.MinU, bounds.MaxU, bounds.MinV, bounds.MaxV);
-            AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MinU, bounds.MinV, bounds.MaxV, true, -u);
-            AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MaxU, bounds.MinV, bounds.MaxV, true, u);
-            AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MinV, bounds.MinU, bounds.MaxU, false, -v);
-            AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MaxV, bounds.MinU, bounds.MaxU, false, v);
+
+            // The two pillar axis slabs share one box; each face must be rendered by exactly one
+            // slab or an untouched sibling face hides the other slab's holes. Lateral sides are
+            // the sibling's main faces, and the slab whose U axis is vertical owns top/bottom.
+            var addUSides = true;
+            var addVSides = true;
+            if (pillarAxisSlabMode)
+            {
+                addUSides = Mathf.Abs(Vector3.Dot(u, Vector3.up)) > 0.5f;
+                addVSides = false;
+            }
+
+            if (addUSides)
+            {
+                AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MinU, bounds.MinV, bounds.MaxV, true, -u);
+                AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MaxU, bounds.MinV, bounds.MaxV, true, u);
+            }
+
+            if (addVSides)
+            {
+                AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MinV, bounds.MinU, bounds.MaxU, false, -v);
+                AddContourOwnedWallFullOuterSide(vertices, triangles, normal, u, v, halfN, bounds.MaxV, bounds.MinU, bounds.MaxU, false, v);
+            }
         }
 
         private static DamageComponentPlaneBounds SinkContourOwnedWallOutlineFloorEdge(DamageComponentPlaneBounds bounds, Vector3 u, Vector3 v)
@@ -4912,7 +6818,20 @@ namespace ArenaShooter
                 return new List<ContourSegment2D>();
             }
 
-            return BuildClippedVisibleContourSegments(bounds, thickness, true, false);
+            return BuildClippedVisibleContourSegments(bounds, thickness, true, false, 0f);
+        }
+
+        // Sheared tunnels exit the back face offset from where they entered, so the back-face
+        // hole union must be computed at full material depth rather than reusing the front one.
+        private List<ContourSegment2D> GetVisibleContourOwnedWallBackSegments(float thickness)
+        {
+            if (wallDamageStamps.Count == 0 ||
+                !TryGetContourOwnedWallBasis(0f, out _, out _, out _, out var halfN, out var bounds))
+            {
+                return new List<ContourSegment2D>();
+            }
+
+            return BuildClippedVisibleContourSegments(bounds, thickness, true, false, halfN * 2f);
         }
 
         private List<ContourSegment2D> GetContourOwnedWallBridgeSegments(float thickness)
@@ -4923,17 +6842,18 @@ namespace ArenaShooter
                 return new List<ContourSegment2D>();
             }
 
-            return BuildClippedVisibleContourSegments(bounds, thickness, true, true);
+            return BuildClippedVisibleContourSegments(bounds, thickness, true, true, 0f);
         }
 
         private List<ContourSegment2D> BuildClippedVisibleContourSegments(
             DamageComponentPlaneBounds bounds,
             float thickness,
             bool removeSmallInteriorIslands,
-            bool includeNonContourOwners)
+            bool includeNonContourOwners,
+            float depth)
         {
             var result = new List<ContourSegment2D>();
-            var rawSegments = BuildStampUnionDamageSegments(wallDamageStamps, thickness, includeNonContourOwners, removeSmallInteriorIslands);
+            var rawSegments = BuildStampUnionDamageSegments(wallDamageStamps, thickness, includeNonContourOwners, removeSmallInteriorIslands, depth);
             for (var i = 0; i < rawSegments.Count; i++)
             {
                 var segment = rawSegments[i];
@@ -5921,6 +7841,19 @@ namespace ArenaShooter
             bool includeNonContourOwners,
             bool removeSmallInteriorIslands)
         {
+            return BuildStampUnionDamageSegments(stamps, thickness, includeNonContourOwners, removeSmallInteriorIslands, 0f);
+        }
+
+        // depth measures into the material from the front (+normal) face; sheared tunnels slide
+        // their cross-sections per unit depth, so the union is evaluated in the world UV of that
+        // depth and the returned segments live in those coordinates.
+        private List<ContourSegment2D> BuildStampUnionDamageSegments(
+            List<DamageStamp> stamps,
+            float thickness,
+            bool includeNonContourOwners,
+            bool removeSmallInteriorIslands,
+            float depth)
+        {
             var segments = new List<ContourSegment2D>();
             for (var stampIndex = 0; stampIndex < stamps.Count; stampIndex++)
             {
@@ -5933,11 +7866,19 @@ namespace ArenaShooter
                     continue;
                 }
 
+                var ownerOffset = stamp.ShearPerDepth * depth;
                 var edgeCount = stamp.RenderClosed ? stamp.Points.Length : stamp.Points.Length - 2;
                 for (var i = 0; i < edgeCount; i++)
                 {
                     var next = stamp.RenderClosed ? (i + 1) % stamp.Points.Length : i + 1;
-                    AddClippedStampEdge(segments, stamps, stampIndex, stamp, stamp.Points[i], stamp.Points[next]);
+                    AddClippedStampEdge(
+                        segments,
+                        stamps,
+                        stampIndex,
+                        stamp,
+                        stamp.Points[i] + ownerOffset,
+                        stamp.Points[next] + ownerOffset,
+                        depth);
                 }
             }
 
@@ -5985,6 +7926,115 @@ namespace ArenaShooter
             }
         }
 
+        // Builds the through-material tunnel walls (including severance cut faces) as depth
+        // slices, each clipped against the hole union evaluated at that depth. This keeps walls
+        // of merged tunnels with different shot directions from cutting through one another and
+        // lets a structural cut face inherit holes where slanted tunnels cross it.
+        private void AddSlicedContourInteriorBridge(List<Vector3> vertices, List<int> triangles, float thickness)
+        {
+            if (wallDamageStamps.Count == 0 ||
+                !TryGetContourOwnedWallBasis(0f, out _, out _, out _, out var halfN, out var bounds))
+            {
+                return;
+            }
+
+            var wallDepth = halfN * 2f;
+            if (wallDepth <= 0.0001f)
+            {
+                return;
+            }
+
+            var sliceCount = CalculateTunnelBridgeSliceCount();
+            for (var slice = 0; slice < sliceCount; slice++)
+            {
+                var depthNear = wallDepth * slice / sliceCount;
+                var depthFar = wallDepth * (slice + 1) / sliceCount;
+                var depthMid = (depthNear + depthFar) * 0.5f;
+                // Keep regular union segments (per-slice "small island" filtering deletes
+                // whole wall bands, leaving see-through gaps), but cull tiny isolated rings:
+                // those are merge tangency artifacts that would render as floating matte
+                // specks — anything that small and real has already been absorbed.
+                var segments = BuildStampUnionDamageSegments(wallDamageStamps, thickness, true, false, depthMid);
+                RemoveTinyBridgeSegmentGroups(segments, thickness);
+                for (var i = 0; i < segments.Count; i++)
+                {
+                    var segment = segments[i];
+                    if (segment.Stamp == null ||
+                        !TryClipSegmentToBounds(segment.Start, segment.End, bounds, out var start, out var end))
+                    {
+                        continue;
+                    }
+
+                    var shear = segment.Stamp.ShearPerDepth;
+                    AddInteriorBridgeSegment(
+                        vertices,
+                        triangles,
+                        TunnelWorldUvToLocal(segment.Stamp, start + shear * (depthNear - depthMid), depthNear, wallDepth),
+                        TunnelWorldUvToLocal(segment.Stamp, end + shear * (depthNear - depthMid), depthNear, wallDepth),
+                        TunnelWorldUvToLocal(segment.Stamp, start + shear * (depthFar - depthMid), depthFar, wallDepth),
+                        TunnelWorldUvToLocal(segment.Stamp, end + shear * (depthFar - depthMid), depthFar, wallDepth));
+                }
+            }
+        }
+
+        private void RemoveTinyBridgeSegmentGroups(List<ContourSegment2D> segments, float thickness)
+        {
+            if (segments.Count == 0)
+            {
+                return;
+            }
+
+            var groups = BuildContourSegmentGroups(segments, Mathf.Max(0.002f, thickness * 0.35f));
+            List<int> doomedSegments = null;
+            for (var i = 0; i < groups.Count; i++)
+            {
+                var span = groups[i].Span;
+                if (Mathf.Max(span.x, span.y) > BridgeSliceArtifactMaxSpan)
+                {
+                    continue;
+                }
+
+                doomedSegments ??= new List<int>();
+                doomedSegments.AddRange(groups[i].SegmentIndexes);
+            }
+
+            if (doomedSegments == null)
+            {
+                return;
+            }
+
+            doomedSegments.Sort();
+            for (var i = doomedSegments.Count - 1; i >= 0; i--)
+            {
+                segments.RemoveAt(doomedSegments[i]);
+            }
+        }
+
+        private int CalculateTunnelBridgeSliceCount()
+        {
+            for (var i = 0; i < wallDamageStamps.Count; i++)
+            {
+                var stamp = wallDamageStamps[i];
+                if (stamp != null && stamp.ShearPerDepth.sqrMagnitude > 0.000001f)
+                {
+                    return ShearedTunnelBridgeSlices;
+                }
+            }
+
+            return 1;
+        }
+
+        private static Vector3 TunnelWorldUvToLocal(DamageStamp stamp, Vector2 worldUv, float depth, float wallDepth)
+        {
+            var planeCoordinate = Mathf.Lerp(stamp.Plane, -stamp.Plane, depth / wallDepth);
+            return stamp.Normal * planeCoordinate + stamp.U * worldUv.x + stamp.V * worldUv.y;
+        }
+
+        private static Vector3 DamageStampWorldPointToLocal(DamageStamp stamp, Vector2 worldPoint, float planeOffset)
+        {
+            return stamp.Normal * (stamp.Plane + planeOffset) + stamp.U * worldPoint.x + stamp.V * worldPoint.y;
+        }
+
         private void AddOppositeDamageContourSegments(List<Vector3> vertices, List<int> triangles, List<ContourSegment2D> frontSegments, float thickness)
         {
             for (var i = 0; i < frontSegments.Count; i++)
@@ -6006,7 +8056,7 @@ namespace ArenaShooter
             }
         }
 
-        private void AddClippedStampEdge(List<ContourSegment2D> segments, List<DamageStamp> stamps, int ownerIndex, DamageStamp ownerStamp, Vector2 start, Vector2 end)
+        private void AddClippedStampEdge(List<ContourSegment2D> segments, List<DamageStamp> stamps, int ownerIndex, DamageStamp ownerStamp, Vector2 start, Vector2 end, float depth)
         {
             var cuts = new List<float> { 0f, 1f };
             var edgeMin = Vector2.Min(start, end);
@@ -6022,16 +8072,24 @@ namespace ArenaShooter
                 var other = stamps[i];
                 if (other == null ||
                     other.Points == null ||
-                    other.Points.Length < 3 ||
-                    !BoundsOverlap(edgeMin, edgeMax, other.Min, other.Max))
+                    other.Points.Length < 3)
                 {
                     continue;
                 }
 
-                AddSegmentPolygonIntersectionCuts(start, end, other.Points, cuts);
+                // Shift the edge into the other stamp's front-polygon frame at this depth; the
+                // parametric cuts are unchanged by the translation.
+                var otherOffset = other.ShearPerDepth * depth;
+                if (!BoundsOverlap(edgeMin, edgeMax, other.Min + otherOffset, other.Max + otherOffset))
+                {
+                    continue;
+                }
+
+                AddSegmentPolygonIntersectionCuts(start - otherOffset, end - otherOffset, other.Points, cuts);
             }
 
             cuts.Sort();
+            var edgeLength = (end - start).magnitude;
             for (var i = 0; i < cuts.Count - 1; i++)
             {
                 var t0 = cuts[i];
@@ -6041,8 +8099,16 @@ namespace ArenaShooter
                     continue;
                 }
 
+                // Slivers where jagged closed polygons graze each other render as floating
+                // dust — drop them outright. Open stamps are exempt: their deliberately tiny
+                // "line shard" fragments are managed by the open-contour shard pipeline.
+                if (ownerStamp.RenderClosed && edgeLength * (t1 - t0) <= MinContourSegmentLength)
+                {
+                    continue;
+                }
+
                 var midpoint = Vector2.Lerp(start, end, (t0 + t1) * 0.5f);
-                if (IsPointInsideOtherDamageStamp(midpoint, stamps, ownerIndex))
+                if (IsPointInsideOtherDamageStamp(midpoint, stamps, ownerIndex, depth))
                 {
                     continue;
                 }
@@ -6479,7 +8545,7 @@ namespace ArenaShooter
                 aMax.y >= bMin.y;
         }
 
-        private bool IsPointInsideOtherDamageStamp(Vector2 point, List<DamageStamp> stamps, int ownerIndex)
+        private bool IsPointInsideOtherDamageStamp(Vector2 point, List<DamageStamp> stamps, int ownerIndex, float depth)
         {
             for (var i = 0; i < stamps.Count; i++)
             {
@@ -6489,12 +8555,17 @@ namespace ArenaShooter
                 }
 
                 var stamp = stamps[i];
-                if (stamp != null &&
-                    point.x >= stamp.Min.x &&
-                    point.x <= stamp.Max.x &&
-                    point.y >= stamp.Min.y &&
-                    point.y <= stamp.Max.y &&
-                    IsPointInPolygon(point, stamp.Points))
+                if (stamp == null)
+                {
+                    continue;
+                }
+
+                var corrected = point - stamp.ShearPerDepth * depth;
+                if (corrected.x >= stamp.Min.x &&
+                    corrected.x <= stamp.Max.x &&
+                    corrected.y >= stamp.Min.y &&
+                    corrected.y <= stamp.Max.y &&
+                    IsPointInPolygon(corrected, stamp.Points))
                 {
                     return true;
                 }
@@ -6553,12 +8624,12 @@ namespace ArenaShooter
 
         private static Vector3 DamageStampPointToLocal(DamageStamp stamp, Vector2 point)
         {
-            return stamp.Normal * stamp.Plane + stamp.U * point.x + stamp.V * point.y;
+            return stamp.Normal * stamp.Plane + stamp.U * (point.x + stamp.UvOffset.x) + stamp.V * (point.y + stamp.UvOffset.y);
         }
 
         private static Vector3 DamageStampPointToLocal(DamageStamp stamp, Vector2 point, float planeOffset)
         {
-            return stamp.Normal * (stamp.Plane + planeOffset) + stamp.U * point.x + stamp.V * point.y;
+            return stamp.Normal * (stamp.Plane + planeOffset) + stamp.U * (point.x + stamp.UvOffset.x) + stamp.V * (point.y + stamp.UvOffset.y);
         }
 
         private void AddContourSegment(List<Vector3> vertices, List<int> triangles, Vector3 start, Vector3 end, Vector3 normal, float thickness)

@@ -45,7 +45,7 @@ namespace ArenaShooter
         private const float AllOutWarTunnelTraceRingThickness = 0.055f;
         private const float AllOutWarTunnelTracePortalMargin = 1.35f;
         private const int AllOutWarTunnelRouteAttempts = 260;
-        private const int AllOutWarHillyMinimumTerrainOnlyHills = 3;
+        private const int AllOutWarHillyMinimumTerrainOnlyHills = 6;
 
         private sealed class AllOutWarPhaseTimer
         {
@@ -889,9 +889,10 @@ namespace ArenaShooter
             }
 
             var wantsHillCut = mapStyle == AllOutWarMapStyle.Hilly || (terrainProfile != null && terrainProfile.HasTerrainOnlyHills);
+            var hillCutAdded = false;
             if (wantsHillCut)
             {
-                TryAddAllOutWarTunnelRoute(
+                hillCutAdded = TryAddAllOutWarTunnelRoute(
                     layout,
                     random,
                     terrainProfile,
@@ -901,7 +902,10 @@ namespace ArenaShooter
                     corridorWidth);
             }
 
-            while (layout.TunnelRoutes.Count < targetCount)
+            // A hill cut must not consume a small map's only tunnel slot, or underground
+            // tunnels can never appear on hilly skirmish maps.
+            var totalTarget = targetCount + (hillCutAdded && targetCount <= 1 ? 1 : 0);
+            while (layout.TunnelRoutes.Count < totalTarget)
             {
                 if (!TryAddAllOutWarTunnelRoute(
                         layout,
@@ -919,7 +923,8 @@ namespace ArenaShooter
 
         private static int CalculateAllOutWarTunnelTargetCount(ArenaLayout layout, int gridRadius)
         {
-            if (layout == null || layout.Rooms.Count < 18)
+            // Small skirmish maps hold roughly 15-25 rooms; they still deserve a tunnel.
+            if (layout == null || layout.Rooms.Count < 12)
             {
                 return 0;
             }
@@ -1998,6 +2003,8 @@ namespace ArenaShooter
             public bool HasTerrainOnlyHills => terrainOnlyHillRegions.Count > 0;
             public int TerrainOnlyHillRegionCount => terrainOnlyHillRegions.Count;
 
+            private int reservationGridRadius = 8;
+
             public void BuildTerrainOnlyHillReservations(
                 HashSet<Vector2Int> allowed,
                 HashSet<Vector2Int> spawnProtectedRooms,
@@ -2009,7 +2016,12 @@ namespace ArenaShooter
                 terrainOnlyHillRegions.Clear();
                 terrainOnlyHillNoBuildCells.Clear();
                 terrainOnlyHillHardCells.Clear();
-                if (allowed == null || allowed.Count < TacticalHillMinimumSupportRooms + 8)
+                reservationGridRadius = gridRadius;
+                // Small battlefield grids hold far fewer cells, so the room-count minimums
+                // scale down with them; hills themselves shrink to match (see
+                // CreateTerrainOnlyHillRegion) so the hilly style keeps its guaranteed hills.
+                var minimumSupportRooms = GetScaledTacticalHillMinimumSupportRooms(gridRadius);
+                if (allowed == null || allowed.Count < minimumSupportRooms + 8)
                 {
                     return;
                 }
@@ -2024,7 +2036,7 @@ namespace ArenaShooter
                     }
                 }
 
-                if (eligibleCells.Count < TacticalHillMinimumSupportRooms)
+                if (eligibleCells.Count < minimumSupportRooms)
                 {
                     return;
                 }
@@ -2035,7 +2047,7 @@ namespace ArenaShooter
                 var hilly = mapStyle == AllOutWarMapStyle.Hilly;
                 var signalThreshold = hilly ? 0.34f : TacticalHillSignalThreshold;
                 var targetHillCount = hilly
-                    ? Mathf.Clamp(AllOutWarHillyMinimumTerrainOnlyHills + eligibleCells.Count / 78, AllOutWarHillyMinimumTerrainOnlyHills, 5)
+                    ? Mathf.Clamp(AllOutWarHillyMinimumTerrainOnlyHills + eligibleCells.Count / 78, AllOutWarHillyMinimumTerrainOnlyHills, 8)
                     : Mathf.Clamp(eligibleCells.Count / 78, 0, 1);
                 var acceptedHills = 0;
 
@@ -2435,7 +2447,7 @@ namespace ArenaShooter
                 var peakHeight = CalculateTacticalHillPeakHeight(allowed.Count, signal, signalThreshold, forceMinimumHill);
                 var center = RoomPoint(seed, cellSpacing);
                 var sizeClass = ChooseTerrainOnlyHillSizeClass(seed, signal, forceMinimumHill);
-                var region = CreateTerrainOnlyHillRegion(center, peakHeight, roomSize, sizeClass);
+                var region = CreateTerrainOnlyHillRegion(center, peakHeight, roomSize, sizeClass, gridRadius);
                 if (!HasTerrainOnlyHillCoreSeparation(region))
                 {
                     return false;
@@ -2448,8 +2460,8 @@ namespace ArenaShooter
 
                 var crestCells = BuildTerrainOnlyHillRegionCells(eligibleCells, region.Center, region.CrestRadius + cellSpacing * 0.55f);
                 var actualHillCells = BuildTerrainOnlyHillRegionCells(eligibleCells, region.Center, region.NoStructureRadius);
-                if (crestCells.Count < TacticalHillMinimumPlateauRooms ||
-                    actualHillCells.Count < TacticalHillMinimumSupportRooms)
+                if (crestCells.Count < GetScaledTacticalHillMinimumPlateauRooms(gridRadius) ||
+                    actualHillCells.Count < GetScaledTacticalHillMinimumSupportRooms(gridRadius))
                 {
                     return false;
                 }
@@ -2510,12 +2522,22 @@ namespace ArenaShooter
 
             private float GetTerrainOnlyHillCoreSeparationRadius(TerrainOnlyHillRegion region)
             {
-                var corePadding = Mathf.Max(cellSpacing * 0.35f, region.CrestRadius * 0.18f);
+                // Small battlefields cannot afford the full big-map spread between hills:
+                // neighboring-cell hills with overlapping shoulders are explicitly allowed
+                // there, otherwise six hills can never pack onto the smallest grid.
+                var paddingScale = reservationGridRadius <= 4 ? 0.42f : 1f;
+                var corePadding = Mathf.Max(cellSpacing * 0.35f * paddingScale, region.CrestRadius * 0.18f);
                 return Mathf.Min(region.OuterRadius, region.CrestRadius + corePadding);
             }
 
             private TerrainOnlyHillSizeClass ChooseTerrainOnlyHillSizeClass(Vector2Int seed, float signal, bool forceMinimumHill)
             {
+                if (reservationGridRadius <= 4)
+                {
+                    // Only compact hills fit a small battlefield three times over.
+                    return TerrainOnlyHillSizeClass.Compact;
+                }
+
                 if (mapStyle != AllOutWarMapStyle.Hilly)
                 {
                     return TerrainOnlyHillSizeClass.Large;
@@ -2540,8 +2562,23 @@ namespace ArenaShooter
                 return bucket < 48 ? TerrainOnlyHillSizeClass.Compact : TerrainOnlyHillSizeClass.Medium;
             }
 
-            private TerrainOnlyHillRegion CreateTerrainOnlyHillRegion(Vector2 center, float peakHeight, float roomSize, TerrainOnlyHillSizeClass sizeClass)
+            private static int GetScaledTacticalHillMinimumSupportRooms(int gridRadius)
             {
+                // Small-map hills are deliberately single-cell footprints.
+                return gridRadius <= 4 ? 1 : TacticalHillMinimumSupportRooms;
+            }
+
+            private static int GetScaledTacticalHillMinimumPlateauRooms(int gridRadius)
+            {
+                return gridRadius <= 4 ? 1 : TacticalHillMinimumPlateauRooms;
+            }
+
+            private TerrainOnlyHillRegion CreateTerrainOnlyHillRegion(Vector2 center, float peakHeight, float roomSize, TerrainOnlyHillSizeClass sizeClass, int gridRadius)
+            {
+                // Hills shrink with the battlefield so a radius-3 skirmish map can still fit
+                // the hilly style's minimum of three; the slope-derived shoulder run is never
+                // scaled, so every hill stays traversable.
+                var sizeScale = Mathf.Lerp(0.55f, 1f, Mathf.InverseLerp(3f, 6f, gridRadius));
                 var hilly = mapStyle == AllOutWarMapStyle.Hilly;
                 var crestSpacingScale = hilly
                     ? sizeClass == TerrainOnlyHillSizeClass.Compact ? 0.62f : sizeClass == TerrainOnlyHillSizeClass.Medium ? 0.75f : 0.92f
@@ -2563,14 +2600,54 @@ namespace ArenaShooter
                         sizeClass == TerrainOnlyHillSizeClass.Medium ? Mathf.Max(roomSize * 0.28f, cellSpacing * 0.20f) :
                         Mathf.Max(roomSize * 0.55f, cellSpacing * 0.45f)
                     : Mathf.Max(roomSize * 0.55f, cellSpacing * 0.45f);
-                var crestRadius = Mathf.Max(roomSize * crestRoomScale, cellSpacing * crestSpacingScale);
+                // Deterministic per-hill variety: an elliptical crest (asymmetry) and a
+                // variable plateau (peakedness). The shoulder run is identical in every
+                // direction, so slopes never exceed the size class's traversable angle.
+                // Large hills keep the classic symmetric profile — they host hill-cut
+                // tunnels, whose mouth/clearance solving assumes the radial shape.
+                // Note: the variety must not perturb the reservation radii — acceptance order
+                // (and therefore which hills exist per seed) has to stay deterministic. Only
+                // the sampled surface shape varies.
+                var varietyRandom = new System.Random(
+                    Mathf.Abs(Mathf.RoundToInt(center.x * 73.856f) * 73856093 ^
+                        Mathf.RoundToInt(center.y * 19.349f) * 19349663 ^
+                        terrainOnlyHillRegions.Count * 83492791));
+                var shapeVariety = hilly && sizeClass != TerrainOnlyHillSizeClass.Large;
+                var crestEccentricity = shapeVariety ? Mathf.Lerp(0f, 0.35f, (float)varietyRandom.NextDouble()) : 0f;
+                var axisAngle = (float)varietyRandom.NextDouble() * Mathf.PI;
+                var elongationAxis = new Vector2(Mathf.Cos(axisAngle), Mathf.Sin(axisAngle));
+                var crestSharpness = shapeVariety ? Mathf.Lerp(0f, 0.7f, (float)varietyRandom.NextDouble()) : 0f;
+
+                if (gridRadius <= 4)
+                {
+                    // Slightly steeper (still walkable) shoulders keep small-map hill
+                    // footprints inside a single grid cell so three can coexist.
+                    shoulderSlopeDegrees = Mathf.Max(shoulderSlopeDegrees, 38f);
+                }
+
+                var crestRadius = Mathf.Max(roomSize * crestRoomScale, cellSpacing * crestSpacingScale) * sizeScale;
                 var shoulderRun = Mathf.Max(
-                    cellSpacing * shoulderSpacingScale,
+                    cellSpacing * shoulderSpacingScale * sizeScale,
                     peakHeight * Mathf.PI / (2f * Mathf.Tan(shoulderSlopeDegrees * Mathf.Deg2Rad)));
                 var outerRadius = crestRadius + shoulderRun;
-                var noStructureRadius = outerRadius + noStructurePadding;
-                var spacingRadius = noStructureRadius + spacingPadding;
-                return new TerrainOnlyHillRegion(center, peakHeight, crestRadius, outerRadius, noStructureRadius, spacingRadius, sizeClass);
+                var noStructureRadius = outerRadius + noStructurePadding * sizeScale;
+                if (gridRadius <= 4)
+                {
+                    noStructureRadius = Mathf.Min(noStructureRadius, cellSpacing * 0.97f);
+                }
+
+                var spacingRadius = noStructureRadius + spacingPadding * sizeScale;
+                return new TerrainOnlyHillRegion(
+                    center,
+                    peakHeight,
+                    crestRadius,
+                    outerRadius,
+                    noStructureRadius,
+                    spacingRadius,
+                    sizeClass,
+                    elongationAxis,
+                    crestEccentricity,
+                    crestSharpness);
             }
 
             private HashSet<Vector2Int> BuildTerrainOnlyHillRegionCells(HashSet<Vector2Int> allowed, Vector2 center, float radius)
@@ -3036,8 +3113,14 @@ namespace ArenaShooter
 
             private float GetTacticalHillCandidateScore(Vector2Int room, float spacing)
             {
-                var point = RoomPoint(room, spacing);
-                return SampleTacticalHillSignal(point);
+                // Mix per-seed placement noise into the Perlin signal so hills scatter across
+                // the map instead of always clustering on the strongest noise blob.
+                var signal = SampleTacticalHillSignal(RoomPoint(room, spacing));
+                var hash = Mathf.Abs(
+                    room.x * 73856093 ^
+                    room.y * 19349663 ^
+                    Mathf.RoundToInt(tacticalHillOffset.x * 17f + tacticalHillOffset.y * 29f) * 83492791);
+                return signal * 0.62f + (hash % 1000) / 1000f * 0.38f;
             }
 
             private float SampleTacticalHillSignal(Vector2 point)
@@ -3053,7 +3136,10 @@ namespace ArenaShooter
                 var height = Mathf.Lerp(TacticalHillMinimumHeight, mapPeak, signalStrength);
                 if (forceMinimumHill)
                 {
-                    height = Mathf.Max(height, Mathf.Lerp(TacticalHillMinimumHeight, tacticalHillPeakHeight, 0.62f));
+                    // The forced floor follows the map-scaled peak (identical on full-size
+                    // maps); the unscaled value forced oversized hills onto small grids,
+                    // whose footprints could never fit three times.
+                    height = Mathf.Max(height, Mathf.Lerp(TacticalHillMinimumHeight, mapPeak, 0.62f));
                 }
 
                 return Mathf.Clamp(height, TacticalHillMinimumHeight, TacticalHillMaximumHeight);
@@ -3189,9 +3275,14 @@ namespace ArenaShooter
                     return false;
                 }
 
+                // Asymmetric hills have a direction-dependent crest; the mouth search window
+                // must follow the actual shoulder on the approach side or every sample lands
+                // on already-fallen terrain.
                 var insideMargin = Mathf.Max(tunnelWidth * 0.34f, 1.1f);
-                var outerLimit = region.OuterRadius - insideMargin;
-                var innerLimit = region.CrestRadius + Mathf.Max(0.65f, tunnelWidth * 0.16f);
+                var directionalCrest = region.DirectionalCrestRadius(-flatDirection);
+                var shoulderRun = region.OuterRadius - region.CrestRadius;
+                var outerLimit = directionalCrest + shoulderRun - insideMargin;
+                var innerLimit = directionalCrest + Mathf.Max(0.65f, tunnelWidth * 0.16f);
                 if (outerLimit <= innerLimit)
                 {
                     return false;
@@ -3774,8 +3865,26 @@ namespace ArenaShooter
                 public readonly float NoStructureRadius;
                 public readonly float SpacingRadius;
                 public readonly TerrainOnlyHillSizeClass SizeClass;
+                public readonly Vector2 ElongationAxis;
+                public readonly float CrestEccentricity;
+                public readonly float CrestSharpness;
 
                 public TerrainOnlyHillRegion(Vector2 center, float peakHeight, float crestRadius, float outerRadius, float noStructureRadius, float spacingRadius, TerrainOnlyHillSizeClass sizeClass)
+                    : this(center, peakHeight, crestRadius, outerRadius, noStructureRadius, spacingRadius, sizeClass, Vector2.right, 0f, 0f)
+                {
+                }
+
+                public TerrainOnlyHillRegion(
+                    Vector2 center,
+                    float peakHeight,
+                    float crestRadius,
+                    float outerRadius,
+                    float noStructureRadius,
+                    float spacingRadius,
+                    TerrainOnlyHillSizeClass sizeClass,
+                    Vector2 elongationAxis,
+                    float crestEccentricity,
+                    float crestSharpness)
                 {
                     Center = center;
                     PeakHeight = Mathf.Max(0f, peakHeight);
@@ -3784,24 +3893,53 @@ namespace ArenaShooter
                     NoStructureRadius = Mathf.Max(OuterRadius, noStructureRadius);
                     SpacingRadius = Mathf.Max(NoStructureRadius, spacingRadius);
                     SizeClass = sizeClass;
+                    ElongationAxis = elongationAxis.sqrMagnitude > 0.0001f ? elongationAxis.normalized : Vector2.right;
+                    CrestEccentricity = Mathf.Clamp(crestEccentricity, 0f, 0.45f);
+                    CrestSharpness = Mathf.Clamp01(crestSharpness);
+                }
+
+                public float DirectionalCrestRadius(Vector2 outwardDirection)
+                {
+                    if (CrestEccentricity <= 0.0001f || outwardDirection.sqrMagnitude <= 0.0001f)
+                    {
+                        return CrestRadius;
+                    }
+
+                    var alongness = Vector2.Dot(outwardDirection.normalized, ElongationAxis);
+                    return CrestRadius * (1f - CrestEccentricity * alongness * alongness);
                 }
 
                 public float SampleHeight(Vector2 point)
                 {
-                    var distance = Vector2.Distance(point, Center);
+                    var delta = point - Center;
+                    var distance = delta.magnitude;
                     if (distance >= OuterRadius)
                     {
                         return 0f;
                     }
 
-                    var crestEdgeHeight = PeakHeight * TacticalHillCrestEdgeHeightScale;
-                    if (distance <= CrestRadius)
+                    // The crest is an ellipse (shorter across the elongation axis) while the
+                    // shoulder run stays the same length in every direction, so the hill is
+                    // asymmetric without ever steepening past the designed slope.
+                    var directionalCrest = CrestRadius;
+                    if (CrestEccentricity > 0.0001f && distance > 0.0001f)
                     {
-                        var crestT = SmootherStep(distance / CrestRadius);
+                        var alongness = Vector2.Dot(delta / distance, ElongationAxis);
+                        directionalCrest = CrestRadius * (1f - CrestEccentricity * alongness * alongness);
+                    }
+
+                    var shoulderRun = Mathf.Max(0.1f, OuterRadius - CrestRadius);
+                    var crestEdgeHeight = PeakHeight * TacticalHillCrestEdgeHeightScale;
+                    if (distance <= directionalCrest)
+                    {
+                        // Sharpness shrinks the flat top toward a rounded peak; SmootherStep
+                        // keeps the apex and the crest edge slope-continuous.
+                        var plateauRadius = directionalCrest * Mathf.Lerp(1f, 0.45f, CrestSharpness);
+                        var crestT = SmootherStep(Mathf.Clamp01(distance / Mathf.Max(0.1f, plateauRadius)));
                         return Mathf.Lerp(PeakHeight, crestEdgeHeight, crestT);
                     }
 
-                    var shoulderT = Mathf.Clamp01((distance - CrestRadius) / Mathf.Max(0.1f, OuterRadius - CrestRadius));
+                    var shoulderT = Mathf.Clamp01((distance - directionalCrest) / shoulderRun);
                     var shoulder = Mathf.Cos(shoulderT * Mathf.PI) * 0.5f + 0.5f;
                     return crestEdgeHeight * shoulder;
                 }
@@ -4264,7 +4402,8 @@ namespace ArenaShooter
             }
 
             var hasTunnelOpening = TryGetAllOutWarSubfloorWallOpeningWidth(layout, room, direction, doorwayWidth, roomSize, out var tunnelOpeningWidth);
-            var hasOpening = hasDoor || hasGate || hasTunnelOpening;
+            var hasHillsideOpening = !hasDoor && !hasGate && !hasTunnelOpening && ShouldOpenWallToHillTerrain(room, direction);
+            var hasOpening = hasDoor || hasGate || hasTunnelOpening || hasHillsideOpening;
             if (!hasOpening && IsAllOutWarDomeEdgeOpening(layout, room, direction))
             {
                 return;
@@ -4276,23 +4415,32 @@ namespace ArenaShooter
 
             if (!hasOpening)
             {
+                // Perpendicular walls butt at room corners instead of overlapping: the
+                // X-spanning walls own the corner volume and the Z-spanning walls pull back
+                // half a wall thickness per end, so corner damage cannot expose embedded
+                // material from the crossing wall.
                 var scale = horizontal
                     ? new Vector3(roomSize, wallHeight, structuralThickness)
-                    : new Vector3(structuralThickness, wallHeight, roomSize);
+                    : new Vector3(structuralThickness, wallHeight, roomSize - structuralThickness);
                 CreateCube("Arena Wall", root, wallCenter, scale, theme.Wall);
                 return;
             }
 
+            // Opening pillars are structuralThickness * 1.25f wide and centered at ±halfDoorway,
+            // so the flanking segments stop at the pillar's outer face instead of its center.
+            var pillarHalfWidth = structuralThickness * 0.625f;
+            var segmentStart = halfDoorway + pillarHalfWidth;
+
             if (horizontal)
             {
-                var segmentLength = halfRoom - halfDoorway;
+                var segmentLength = halfRoom - segmentStart;
                 if (segmentLength <= 0.1f)
                 {
                     return;
                 }
 
-                var leftOffset = offset + new Vector3(-(halfDoorway + segmentLength * 0.5f), 0f, 0f);
-                var rightOffset = offset + new Vector3(halfDoorway + segmentLength * 0.5f, 0f, 0f);
+                var leftOffset = offset + new Vector3(-(segmentStart + segmentLength * 0.5f), 0f, 0f);
+                var rightOffset = offset + new Vector3(segmentStart + segmentLength * 0.5f, 0f, 0f);
                 var scale = new Vector3(segmentLength, wallHeight, structuralThickness);
                 CreateCube("Arena Wall Door Segment", root, center + leftOffset, scale, theme.Wall);
                 CreateCube("Arena Wall Door Segment", root, center + rightOffset, scale, theme.Wall);
@@ -4300,19 +4448,41 @@ namespace ArenaShooter
             }
             else
             {
-                var segmentLength = halfRoom - halfDoorway;
+                // Z-spanning door segments stop half a thickness shy of the room corner so
+                // they butt against the X-spanning walls instead of crossing through them.
+                var outerEnd = halfRoom - structuralThickness * 0.5f;
+                var segmentLength = outerEnd - segmentStart;
                 if (segmentLength <= 0.1f)
                 {
                     return;
                 }
 
-                var lowerOffset = offset + new Vector3(0f, 0f, -(halfDoorway + segmentLength * 0.5f));
-                var upperOffset = offset + new Vector3(0f, 0f, halfDoorway + segmentLength * 0.5f);
+                var lowerOffset = offset + new Vector3(0f, 0f, -(segmentStart + segmentLength * 0.5f));
+                var upperOffset = offset + new Vector3(0f, 0f, segmentStart + segmentLength * 0.5f);
                 var scale = new Vector3(structuralThickness, wallHeight, segmentLength);
                 CreateCube("Arena Wall Door Segment", root, center + lowerOffset, scale, theme.Wall);
                 CreateCube("Arena Wall Door Segment", root, center + upperOffset, scale, theme.Wall);
                 CreateOpeningPillars(theme, root, center + offset, false, halfDoorway, wallHeight, structuralThickness);
             }
+        }
+
+        // Most walls facing open hill terrain become hallway-style doorways so the hills are
+        // reachable from the rooms instead of fenced off; a deterministic minority stay
+        // solid so layouts still vary.
+        private bool ShouldOpenWallToHillTerrain(Vector2Int room, Vector2Int direction)
+        {
+            if (!generatingAllOutWar || activeAllOutWarTerrainProfile == null)
+            {
+                return false;
+            }
+
+            if (!activeAllOutWarTerrainProfile.IsTerrainOnlyHillNoBuildCell(room + direction))
+            {
+                return false;
+            }
+
+            var hash = Mathf.Abs(room.x * 73856093 ^ room.y * 19349663 ^ (direction.x * 3 + direction.y * 7) * 83492791);
+            return hash % 100 < 70;
         }
 
         private static bool TryGetAllOutWarSubfloorWallOpeningWidth(
@@ -4487,6 +4657,11 @@ namespace ArenaShooter
         private void CreateCorridor(ArenaTheme theme, Transform root, ArenaLayout layout, Vector2Int fromRoom, Vector2Int toRoom, Vector2Int direction, float roomSize, float corridorLength, float corridorWidth, float wallHeight, Vector3 from, Vector3 to)
         {
             const float thickness = 0.35f;
+            // The corridor spans between the two room wall planes, which are also the center planes
+            // of the doorway opening pillars (depth structuralThickness * 1.9f). Pull both corridor
+            // wall ends back to the pillars' corridor-side faces so they do not penetrate the pillars.
+            var openingPillarDepth = thickness * 1.35f * 1.9f;
+            var corridorWallLength = Mathf.Max(0.1f, corridorLength - openingPillarDepth);
             var center = (from + to) * 0.5f;
             var vertical = direction == Vector2Int.up || direction == Vector2Int.down;
             var openClearingLink = layout != null && layout.AreRoomsInSameClearing(fromRoom, toRoom);
@@ -4507,8 +4682,8 @@ namespace ArenaShooter
                     return;
                 }
 
-                CreateCube("Corridor Wall", root, center + new Vector3(-corridorWidth * 0.5f, wallHeight * 0.5f, 0f), new Vector3(thickness, wallHeight, corridorLength), theme.Wall);
-                CreateCube("Corridor Wall", root, center + new Vector3(corridorWidth * 0.5f, wallHeight * 0.5f, 0f), new Vector3(thickness, wallHeight, corridorLength), theme.Wall);
+                CreateCube("Corridor Wall", root, center + new Vector3(-corridorWidth * 0.5f, wallHeight * 0.5f, 0f), new Vector3(thickness, wallHeight, corridorWallLength), theme.Wall);
+                CreateCube("Corridor Wall", root, center + new Vector3(corridorWidth * 0.5f, wallHeight * 0.5f, 0f), new Vector3(thickness, wallHeight, corridorWallLength), theme.Wall);
                 AddCorridorWallPanel(theme, root, center + new Vector3(-corridorWidth * 0.5f + 0.08f, wallHeight * 0.68f, 0f), Quaternion.Euler(0f, 90f, 0f));
                 AddCorridorWallPanel(theme, root, center + new Vector3(corridorWidth * 0.5f - 0.08f, wallHeight * 0.68f, 0f), Quaternion.Euler(0f, -90f, 0f));
                 CreateFloorTrimChannel(theme, root, center + new Vector3(0f, 0.031f, 0f), new Vector3(0.055f, 0.018f, corridorLength), false, 0.018f);
@@ -4525,8 +4700,8 @@ namespace ArenaShooter
                     return;
                 }
 
-                CreateCube("Corridor Wall", root, center + new Vector3(0f, wallHeight * 0.5f, -corridorWidth * 0.5f), new Vector3(corridorLength, wallHeight, thickness), theme.Wall);
-                CreateCube("Corridor Wall", root, center + new Vector3(0f, wallHeight * 0.5f, corridorWidth * 0.5f), new Vector3(corridorLength, wallHeight, thickness), theme.Wall);
+                CreateCube("Corridor Wall", root, center + new Vector3(0f, wallHeight * 0.5f, -corridorWidth * 0.5f), new Vector3(corridorWallLength, wallHeight, thickness), theme.Wall);
+                CreateCube("Corridor Wall", root, center + new Vector3(0f, wallHeight * 0.5f, corridorWidth * 0.5f), new Vector3(corridorWallLength, wallHeight, thickness), theme.Wall);
                 AddCorridorWallPanel(theme, root, center + new Vector3(0f, wallHeight * 0.68f, -corridorWidth * 0.5f + 0.08f), Quaternion.identity);
                 AddCorridorWallPanel(theme, root, center + new Vector3(0f, wallHeight * 0.68f, corridorWidth * 0.5f - 0.08f), Quaternion.Euler(0f, 180f, 0f));
                 CreateFloorTrimChannel(theme, root, center + new Vector3(0f, 0.031f, 0f), new Vector3(corridorLength, 0.018f, 0.055f), false, 0.018f);

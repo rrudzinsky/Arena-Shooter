@@ -969,7 +969,7 @@ public sealed class DestructibleArenaPieceIslandTests
 
     private void InvokeAddContourOwnedWallDamage(Vector3 hitPoint)
     {
-        PieceType.GetMethod("AddContourOwnedWallDamage", PrivateInstance).Invoke(piece, new object[] { hitPoint });
+        PieceType.GetMethod("AddContourOwnedWallDamage", PrivateInstance).Invoke(piece, new object[] { hitPoint, Vector3.zero });
     }
 
     private void InvokeTakeDamage(float amount, Vector3 hitPoint, Vector3 hitNormal)

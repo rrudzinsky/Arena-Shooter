@@ -2979,9 +2979,17 @@ namespace ArenaShooter
             var chosenSeed = randomizeSeed || seed == 0 ? Random.Range(1000, 999999) : seed;
             var totalArmies = allOutWarSettings.TotalArmies;
             var mapStyle = allOutWarSettings.MapStyle ?? AllOutWarMapStyleNames.RandomlyGenerate;
-            var baseWarGridRadius = CalculateAllOutWarGridRadius(totalArmies, allOutWarSettings.BattlefieldCap);
+            var baseWarGridRadius = CalculateAllOutWarGridRadius(totalArmies, allOutWarSettings.BattlefieldCap, allOutWarSettings.SoldiersPerArmy);
             var terrainGridBonus = ArenaGenerator.EstimateAllOutWarTerrainGridBonus(chosenSeed, roomSize + corridorLength, mapStyle);
-            var warGridRadius = Mathf.Clamp(baseWarGridRadius + terrainGridBonus, 4, 9);
+            // The battlefield cap owns the map size: terrain styles may widen large battles
+            // for hill room, but must never inflate a small skirmish map (a +2 bonus on a
+            // radius-3 grid nearly triples the playable area).
+            var allowedTerrainBonus = baseWarGridRadius >= 6
+                ? terrainGridBonus
+                : baseWarGridRadius >= 5
+                    ? Mathf.Min(terrainGridBonus, 1)
+                    : 0;
+            var warGridRadius = Mathf.Clamp(baseWarGridRadius + allowedTerrainBonus, 3, 9);
             var warRoomCount = Mathf.Clamp(Mathf.CeilToInt(Mathf.PI * warGridRadius * warGridRadius), 24, 260);
             startupTimer.Mark("root/setup");
             var layout = generator.GenerateAllOutWar(theme, matchRoot.transform, chosenSeed, totalArmies, warRoomCount, warGridRadius, roomSize, corridorLength, corridorWidth, wallHeight, weaponPickupCount + healthPickupCount, mapStyle);
@@ -3024,12 +3032,18 @@ namespace ArenaShooter
             startupTimer.Mark("startup complete");
         }
 
-        private static int CalculateAllOutWarGridRadius(int totalArmies, int battlefieldCap)
+        private static int CalculateAllOutWarGridRadius(int totalArmies, int battlefieldCap, int soldiersPerArmy)
         {
-            var activeBattleSize = Mathf.Max(Mathf.Max(1, battlefieldCap), Mathf.Max(1, totalArmies) * AllOutWarSquadSize);
-            var capRadius = Mathf.CeilToInt(Mathf.Sqrt(activeBattleSize) * 0.30f) + 3;
-            var armyMinimum = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(1, totalArmies) * 0.55f) + 1, 4, 7);
-            return Mathf.Clamp(Mathf.Max(capRadius, armyMinimum), 4, 8);
+            // The map scales with how many soldiers can actually fight at once: the
+            // battlefield cap bounded by the real roster, so a 10-soldier army gets a small
+            // arena even when the cap setting is high. Coefficients are tuned to roughly
+            // half the footprint of the original sizing.
+            var armies = Mathf.Max(1, totalArmies);
+            var roster = armies * Mathf.Max(1, soldiersPerArmy);
+            var activeBattleSize = Mathf.Max(armies * AllOutWarSquadSize, Mathf.Min(Mathf.Max(1, battlefieldCap), roster));
+            var capRadius = Mathf.CeilToInt(Mathf.Sqrt(activeBattleSize) * 0.15f) + 2;
+            var armyMinimum = Mathf.Clamp(Mathf.CeilToInt(armies * 0.55f) + 1, 3, 7);
+            return Mathf.Clamp(Mathf.Max(capRadius, armyMinimum), 3, 8);
         }
 
         private void BeginGateIntro(GameObject actor, ArenaGateSpawn gate, float walkSpeed)
