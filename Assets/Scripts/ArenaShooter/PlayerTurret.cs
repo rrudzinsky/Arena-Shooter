@@ -38,7 +38,7 @@ namespace ArenaShooter
             hitbox.size = new Vector3(1.1f, 1.25f, 1.1f);
 
             weapons = GetComponent<WeaponInventory>();
-            weapons.Configure(health, muzzle, theme.Beam);
+            weapons.Configure(health, muzzle, theme.Beam, theme);
             weapons.Equip(new WeaponDefinition
             {
                 DisplayName = "Turret Blaster",

@@ -6,6 +6,16 @@ namespace ArenaShooter
     {
         private Transform root;
         private Transform weaponRoot;
+        private Transform pistolContent;
+        private Transform shotgunContent;
+        private Transform grenadeContent;
+        private Transform pistolMuzzle;
+        private Transform shotgunMuzzle;
+        private Transform grenadeMuzzle;
+        private Vector3 muzzleBaseScale = Vector3.one;
+        private readonly System.Collections.Generic.Dictionary<Transform, Vector3> muzzleRestScales = new();
+        private WeaponModelKind currentModelKind = WeaponModelKind.PulsePistol;
+        private ArenaTheme theme;
         private Transform ammoCore;
         private Transform muzzleGlow;
         private Transform pistolGripHandRoot;
@@ -48,8 +58,9 @@ namespace ArenaShooter
 
         public Transform Muzzle { get; private set; }
 
-        public void Build(Transform cameraTransform, ArenaTheme theme)
+        public void Build(Transform cameraTransform, ArenaTheme arenaTheme)
         {
+            theme = arenaTheme;
             root = new GameObject("First Person Arms").transform;
             root.SetParent(cameraTransform, false);
             basePosition = new Vector3(0.32f, -0.34f, 0.58f);
@@ -77,28 +88,122 @@ namespace ArenaShooter
             leftGloveBaseScale = leftGlove.localScale;
             rightGloveBaseScale = rightGlove.localScale;
 
-            weaponRoot = new GameObject("Pulse Pistol View").transform;
+            weaponRoot = new GameObject("Weapon View").transform;
             weaponRoot.SetParent(root, false);
             weaponBasePosition = new Vector3(0f, 0.02f, 0.34f);
             weaponBaseRotation = Quaternion.identity;
             weaponRoot.localPosition = weaponBasePosition;
             weaponRoot.localRotation = weaponBaseRotation;
 
-            if (!PulsePistolAsset.TryBuildViewModel(weaponRoot, theme, out muzzleGlow))
+            pistolContent = new GameObject("Pulse Pistol View").transform;
+            pistolContent.SetParent(weaponRoot, false);
+
+            if (!PulsePistolAsset.TryBuildViewModel(pistolContent, theme, out muzzleGlow))
             {
-                CreatePrimitive("Pistol Frame", PrimitiveType.Cube, theme.Wall, new Vector3(0.02f, 0.02f, 0.05f), new Vector3(0.18f, 0.16f, 0.44f), Vector3.zero, weaponRoot);
-                CreatePrimitive("Pistol Barrel", PrimitiveType.Cube, theme.NeonB, new Vector3(0.02f, 0.08f, 0.34f), new Vector3(0.11f, 0.08f, 0.34f), Vector3.zero, weaponRoot);
-                CreatePrimitive("Grip", PrimitiveType.Cube, theme.Wall, new Vector3(0.03f, -0.16f, -0.05f), new Vector3(0.12f, 0.28f, 0.12f), new Vector3(-16f, 0f, 0f), weaponRoot);
-                ammoCore = CreatePrimitive("Ammo Core", PrimitiveType.Cube, theme.Pickup, new Vector3(-0.09f, 0.03f, 0.04f), new Vector3(0.035f, 0.18f, 0.28f), Vector3.zero, weaponRoot).transform;
-                muzzleGlow = CreatePrimitive("Muzzle Glow", PrimitiveType.Sphere, theme.Beam, new Vector3(0.02f, 0.08f, 0.54f), new Vector3(0.09f, 0.09f, 0.09f), Vector3.zero, weaponRoot).transform;
-                DroidRenderSetup.Apply(weaponRoot.gameObject, StylizedOutlineCategory.FirstPersonPistol);
-                MarkFirstPersonWeaponOccluders(weaponRoot);
+                CreatePrimitive("Pistol Frame", PrimitiveType.Cube, theme.Wall, new Vector3(0.02f, 0.02f, 0.05f), new Vector3(0.18f, 0.16f, 0.44f), Vector3.zero, pistolContent);
+                CreatePrimitive("Pistol Barrel", PrimitiveType.Cube, theme.NeonB, new Vector3(0.02f, 0.08f, 0.34f), new Vector3(0.11f, 0.08f, 0.34f), Vector3.zero, pistolContent);
+                CreatePrimitive("Grip", PrimitiveType.Cube, theme.Wall, new Vector3(0.03f, -0.16f, -0.05f), new Vector3(0.12f, 0.28f, 0.12f), new Vector3(-16f, 0f, 0f), pistolContent);
+                ammoCore = CreatePrimitive("Ammo Core", PrimitiveType.Cube, theme.Pickup, new Vector3(-0.09f, 0.03f, 0.04f), new Vector3(0.035f, 0.18f, 0.28f), Vector3.zero, pistolContent).transform;
+                muzzleGlow = CreatePrimitive("Muzzle Glow", PrimitiveType.Sphere, theme.Beam, new Vector3(0.02f, 0.08f, 0.54f), new Vector3(0.09f, 0.09f, 0.09f), Vector3.zero, pistolContent).transform;
+                DroidRenderSetup.Apply(pistolContent.gameObject, StylizedOutlineCategory.FirstPersonPistol);
+                MarkFirstPersonWeaponOccluders(pistolContent);
             }
 
-            Muzzle = muzzleGlow;
+            pistolMuzzle = muzzleGlow;
+            ActivateWeaponContent(pistolContent, pistolMuzzle);
             BuildPistolGripHand(theme);
             BuildSprintHands(theme);
             SetWeaponVisible(false);
+        }
+
+        public void ShowWeaponModel(WeaponModelKind kind)
+        {
+            if (weaponRoot == null)
+            {
+                return;
+            }
+
+            currentModelKind = kind;
+            switch (kind)
+            {
+                case WeaponModelKind.ScatterShotgun:
+                    EnsureShotgunContent();
+                    ActivateWeaponContent(shotgunContent, shotgunMuzzle);
+                    break;
+                case WeaponModelKind.PlasmaGrenade:
+                    EnsureGrenadeContent();
+                    ActivateWeaponContent(grenadeContent, grenadeMuzzle);
+                    break;
+                default:
+                    ActivateWeaponContent(pistolContent, pistolMuzzle);
+                    break;
+            }
+
+            ApplyVisibilityState();
+        }
+
+        private void EnsureShotgunContent()
+        {
+            if (shotgunContent != null)
+            {
+                return;
+            }
+
+            shotgunContent = new GameObject("Scatter Shotgun View").transform;
+            shotgunContent.SetParent(weaponRoot, false);
+            if (!ShotgunAsset.TryBuildViewModel(shotgunContent, theme, out shotgunMuzzle))
+            {
+                CreatePrimitive("Shotgun Receiver", PrimitiveType.Cube, theme.Wall, new Vector3(0.02f, 0f, 0.02f), new Vector3(0.16f, 0.18f, 0.42f), Vector3.zero, shotgunContent);
+                CreatePrimitive("Shotgun Barrels", PrimitiveType.Cube, theme.Wall, new Vector3(0.02f, 0.06f, 0.38f), new Vector3(0.17f, 0.1f, 0.4f), Vector3.zero, shotgunContent);
+                CreatePrimitive("Shotgun Pump", PrimitiveType.Cube, theme.Pillar, new Vector3(0.02f, -0.08f, 0.34f), new Vector3(0.15f, 0.09f, 0.22f), Vector3.zero, shotgunContent);
+                CreatePrimitive("Shotgun Grip", PrimitiveType.Cube, theme.Wall, new Vector3(0.02f, -0.17f, -0.08f), new Vector3(0.11f, 0.26f, 0.13f), new Vector3(-20f, 0f, 0f), shotgunContent);
+                shotgunMuzzle = CreatePrimitive("Shotgun Muzzle Glow", PrimitiveType.Cube, theme.NeonA, new Vector3(0.02f, 0.06f, 0.6f), new Vector3(0.15f, 0.05f, 0.02f), Vector3.zero, shotgunContent).transform;
+                DroidRenderSetup.Apply(shotgunContent.gameObject, StylizedOutlineCategory.FirstPersonPistol);
+                MarkFirstPersonWeaponOccluders(shotgunContent);
+            }
+        }
+
+        private void EnsureGrenadeContent()
+        {
+            if (grenadeContent != null)
+            {
+                return;
+            }
+
+            grenadeContent = new GameObject("Plasma Grenade View").transform;
+            grenadeContent.SetParent(weaponRoot, false);
+            if (!GrenadeAsset.TryBuildViewModel(grenadeContent, theme, out grenadeMuzzle))
+            {
+                var orb = CreatePrimitive("Grenade Orb", PrimitiveType.Sphere, theme.NeonA, new Vector3(0.02f, -0.05f, 0.24f), new Vector3(0.2f, 0.2f, 0.2f), Vector3.zero, grenadeContent);
+                grenadeMuzzle = orb.transform;
+                DroidRenderSetup.Apply(grenadeContent.gameObject, StylizedOutlineCategory.FirstPersonPistol);
+                MarkFirstPersonWeaponOccluders(grenadeContent);
+            }
+        }
+
+        private void ActivateWeaponContent(Transform content, Transform contentMuzzle)
+        {
+            SetTransformVisible(pistolContent, content == pistolContent);
+            SetTransformVisible(shotgunContent, content == shotgunContent);
+            SetTransformVisible(grenadeContent, content == grenadeContent);
+            muzzleGlow = contentMuzzle;
+            if (contentMuzzle != null)
+            {
+                if (!muzzleRestScales.TryGetValue(contentMuzzle, out var restScale))
+                {
+                    restScale = contentMuzzle.localScale;
+                    muzzleRestScales[contentMuzzle] = restScale;
+                }
+
+                muzzleBaseScale = restScale;
+                contentMuzzle.localScale = restScale;
+            }
+            else
+            {
+                muzzleBaseScale = Vector3.one;
+            }
+
+            Muzzle = contentMuzzle;
         }
 
         public void SetWeaponVisible(bool visible)
@@ -159,7 +264,7 @@ namespace ArenaShooter
 
             if (muzzleGlow != null)
             {
-                muzzleGlow.localScale = Vector3.one * Mathf.Lerp(0.055f, 0.16f, recoil);
+                muzzleGlow.localScale = muzzleBaseScale * Mathf.Lerp(1f, 2.6f, recoil);
             }
         }
 
@@ -251,7 +356,7 @@ namespace ArenaShooter
             SetTransformVisible(rightGlove, false);
             SetTransformVisible(leftSprintArmRoot, showSprintHands);
             SetTransformVisible(rightSprintArmRoot, showSprintHands);
-            SetTransformVisible(pistolGripHandRoot, hasWeapon);
+            SetTransformVisible(pistolGripHandRoot, hasWeapon && currentModelKind != WeaponModelKind.PlasmaGrenade);
 
             if (!showSprintHands)
             {

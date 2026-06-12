@@ -15,6 +15,9 @@ namespace ArenaShooter
         private AudioClip footstepClip;
         private AudioClip smallerGunshotClip;
         private AudioClip largerGunshotClip;
+        private AudioClip shotgunBlastClip;
+        private AudioClip grenadeThrowClip;
+        private AudioClip explosionClip;
         private AudioClip[] startFightCrowdClips;
         private AudioClip[] firstBloodCrowdClips;
         private AudioClip[] playerHitClips;
@@ -25,13 +28,18 @@ namespace ArenaShooter
         private bool gateOpenCrowdPlayed;
         private bool firstShotCrowdPlayed;
         private Coroutine gateCrowdSwell;
+        private const float BetweenSongsGapSeconds = 9f;
+
         private Coroutine musicFade;
         private int lastMusicIndex = -1;
+        private float nextTrackAt = -1f;
         private float currentCheerRawVolume = 0.65f;
 
         public static ArenaAudio Instance { get; private set; }
 
         public bool IsGameplayMusicPlaying => musicSource != null && musicSource.isPlaying;
+
+        public bool IsCrowdCheering => cheerSource != null && cheerSource.isPlaying;
 
         private void Awake()
         {
@@ -39,6 +47,9 @@ namespace ArenaShooter
             footstepClip = LoadClip("Footsteps") ?? CreateNoiseBurst("Footstep", 0.09f, 0.26f, 0.05f);
             smallerGunshotClip = LoadClip("Smaller_Pistol_Gunshot") ?? CreateGunshot("Small Pulse Gunshot", 0.15f, 185f);
             largerGunshotClip = LoadClip("Larger_Pistol_Gunshot") ?? CreateGunshot("Large Pulse Gunshot", 0.22f, 118f);
+            shotgunBlastClip = LoadClip("Shotgun_Blast") ?? CreateShotgunBlast("Scatter Shotgun Blast", 0.34f);
+            grenadeThrowClip = LoadClip("Grenade_Throw") ?? CreateThrowWhoosh("Grenade Throw Whoosh", 0.22f);
+            explosionClip = LoadClip("Grenade_Explosion") ?? CreateExplosion("Plasma Explosion", 0.9f);
             startFightCrowdClips = LoadClipSet("Crowd_Cheering_Start_of_Fight", 4);
             firstBloodCrowdClips = LoadClipSet("Crowd_Cheering_First_Blood", 4);
             playerHitClips = new[] { LoadClip("Male_Player_Getting_Hit_1"), LoadClip("Male_Player_Getting_Hit_2") };
@@ -70,6 +81,20 @@ namespace ArenaShooter
                 return;
             }
 
+            // Intermission between tracks: the arena goes quiet and the equalizer
+            // skyline sinks to zero before the next song spins up.
+            if (nextTrackAt < 0f)
+            {
+                nextTrackAt = Time.time + BetweenSongsGapSeconds;
+                return;
+            }
+
+            if (Time.time < nextTrackAt)
+            {
+                return;
+            }
+
+            nextTrackAt = -1f;
             PlayRandomMusicTrack();
         }
 
@@ -88,6 +113,33 @@ namespace ArenaShooter
         {
             var clip = Random.value < 0.68f ? smallerGunshotClip : largerGunshotClip;
             PlaySpatial(clip, position, 0.9f, Random.Range(0.96f, 1.04f), 42f);
+
+            if (!firstShotCrowdPlayed)
+            {
+                firstShotCrowdPlayed = true;
+                PlayCrowdExcited();
+            }
+        }
+
+        public void PlayShotgunBlast(Vector3 position)
+        {
+            PlaySpatial(shotgunBlastClip, position, 1f, Random.Range(0.94f, 1.05f), 52f);
+
+            if (!firstShotCrowdPlayed)
+            {
+                firstShotCrowdPlayed = true;
+                PlayCrowdExcited();
+            }
+        }
+
+        public void PlayGrenadeThrow(Vector3 position)
+        {
+            PlaySpatial(grenadeThrowClip, position, 0.5f, Random.Range(0.95f, 1.06f), 22f);
+        }
+
+        public void PlayExplosion(Vector3 position)
+        {
+            PlaySpatial(explosionClip, position, 1f, Random.Range(0.92f, 1.05f), 72f, 1.2f);
 
             if (!firstShotCrowdPlayed)
             {
@@ -189,7 +241,7 @@ namespace ArenaShooter
             cheerSource.Play();
         }
 
-        private void PlaySpatial(AudioClip clip, Vector3 position, float volume, float pitch, float range)
+        private void PlaySpatial(AudioClip clip, Vector3 position, float volume, float pitch, float range, float maxLifetime = 0.38f)
         {
             if (clip == null)
             {
@@ -207,7 +259,7 @@ namespace ArenaShooter
             source.maxDistance = range;
             source.rolloffMode = AudioRolloffMode.Linear;
             source.Play();
-            Destroy(sound, Mathf.Min(clip.length / Mathf.Max(0.1f, pitch), 0.38f));
+            Destroy(sound, Mathf.Min(clip.length / Mathf.Max(0.1f, pitch), maxLifetime));
         }
 
         private void PlayNonSpatial(AudioClip clip, float volume, float pitch)
@@ -412,6 +464,69 @@ namespace ArenaShooter
                 var envelope = Mathf.Exp(-t * 28f);
                 var crack = Mathf.Sin(2f * Mathf.PI * frequency * t) * 0.35f;
                 data[i] = (Random.Range(-1f, 1f) * 0.8f + crack) * envelope;
+            }
+
+            var clip = AudioClip.Create(clipName, length, 1, sampleRate, false);
+            clip.SetData(data, 0);
+            return clip;
+        }
+
+        private AudioClip CreateShotgunBlast(string clipName, float duration)
+        {
+            const int sampleRate = 44100;
+            var length = Mathf.CeilToInt(sampleRate * duration);
+            var data = new float[length];
+
+            for (var i = 0; i < length; i++)
+            {
+                var t = i / (float)sampleRate;
+                var envelope = Mathf.Exp(-t * 15f);
+                var lowBoom = Mathf.Sin(2f * Mathf.PI * 68f * t) * 0.55f;
+                var crack = Mathf.Sin(2f * Mathf.PI * 215f * t) * 0.2f * Mathf.Exp(-t * 32f);
+                data[i] = Mathf.Clamp((Random.Range(-1f, 1f) * 0.85f + lowBoom + crack) * envelope, -1f, 1f);
+            }
+
+            var clip = AudioClip.Create(clipName, length, 1, sampleRate, false);
+            clip.SetData(data, 0);
+            return clip;
+        }
+
+        private AudioClip CreateThrowWhoosh(string clipName, float duration)
+        {
+            const int sampleRate = 44100;
+            var length = Mathf.CeilToInt(sampleRate * duration);
+            var data = new float[length];
+            var filtered = 0f;
+
+            for (var i = 0; i < length; i++)
+            {
+                var t = i / (float)length;
+                var envelope = Mathf.Sin(t * Mathf.PI);
+                filtered = Mathf.Lerp(filtered, Random.Range(-1f, 1f), 0.16f);
+                data[i] = filtered * 0.85f * envelope;
+            }
+
+            var clip = AudioClip.Create(clipName, length, 1, sampleRate, false);
+            clip.SetData(data, 0);
+            return clip;
+        }
+
+        private AudioClip CreateExplosion(string clipName, float duration)
+        {
+            const int sampleRate = 44100;
+            var length = Mathf.CeilToInt(sampleRate * duration);
+            var data = new float[length];
+            var filtered = 0f;
+
+            for (var i = 0; i < length; i++)
+            {
+                var t = i / (float)sampleRate;
+                var envelope = Mathf.Exp(-t * 5.4f);
+                var rumble = Mathf.Sin(2f * Mathf.PI * 44f * t + Mathf.Sin(t * 9f) * 1.6f) * 0.6f;
+                var mid = Mathf.Sin(2f * Mathf.PI * 118f * t) * 0.16f * Mathf.Exp(-t * 9f);
+                filtered = Mathf.Lerp(filtered, Random.Range(-1f, 1f), 0.32f);
+                var noise = filtered * (0.9f * Mathf.Exp(-t * 6.5f) + 0.3f * Mathf.Exp(-t * 2.4f));
+                data[i] = Mathf.Clamp((noise + rumble + mid) * envelope, -1f, 1f);
             }
 
             var clip = AudioClip.Create(clipName, length, 1, sampleRate, false);

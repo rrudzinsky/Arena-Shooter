@@ -12,74 +12,87 @@ namespace ArenaShooter
         private const int TextRenderQueue = 3000;
         private const float ScoreRefreshInterval = 0.25f;
         private const float EqualizerRefreshInterval = 0.075f;
-        private const float BoardLatitude = 0.3f;
         private const float DomeVerticalUnitsPerLatitude = 226f;
-        private const float MeshSegmentLength = 3.2f;
         private const float ScoreboardMeshSegmentLength = 1.6f;
-        private const float ScoreboardMonitorMountInset = -92f;
-        private const float ScoreboardMonitorDownTiltDegrees = 8f;
-        private const float DetailRadiusInset = -1.6f;
-        private const float ScoreboardBackInset = -8.0f;
-        private const float ScoreboardPanelInset = -8.5f;
-        private const float ScoreboardOuterBorderInset = -9.0f;
-        private const float ScoreboardInnerBorderInset = -9.25f;
-        private const float ScoreboardRowInset = -9.5f;
-        private const float ScoreboardDetailInset = -9.85f;
-        private const float ScoreboardFillInset = -10.15f;
-        private const float ScoreboardTextInset = -10.65f;
-        private const float ScoreboardDomeClearance = 2f;
-        private const float BoardOuterBorderThickness = 1.25f;
-        private const float BoardInnerBorderThickness = 0.7f;
-        private const float BoardBorderGap = 0.75f;
 
+        // The four boards hang as a center-court chandelier box, like a basketball
+        // arena centerhung display. Depths are measured outward from each board face
+        // toward the viewer, replacing the old dome-surface radius insets. The rig
+        // scales and hangs lower on small maps so it stays inside a normal FOV.
+        private const float ChandelierRotationDegreesPerSecond = 3.2f;
+        private const float ChandelierPlateOverhang = 4f;
+        private const float ChandelierFaceOffset = BoardWidth * ScoreboardLocalScale * 0.5f;
+        private const float BoardBedDepth = 0f;
+        private const float BoardPanelDepth = 0.5f;
+        private const float BoardOuterBorderDepth = 1.0f;
+        private const float BoardRowDepth = 1.5f;
+        private const float BoardDetailDepth = 1.85f;
+        private const float BoardFillDepth = 2.15f;
+        private const float BoardTextDepth = 2.65f;
+        private const float BoardOuterBorderThickness = 2.4f;
+
+        // Board content is tuned for distance reading: one big accent-colored army
+        // number, a thick remaining-forces bar, and a tall count — no small capsules.
         private const float ScoreboardLocalScale = 0.8f;
         private const float BoardWidth = 146f;
         private const float RowContentWidth = 138f;
         private const float BoardCornerRadius = 7.0f;
         private const float BoardTopPadding = 3.2f;
         private const float BoardBottomPadding = 5.8f;
-        private const float HeaderHeight = 8.2f;
-        private const float HeaderRowGap = 2.8f;
-        private const float RowHeight = 11f;
-        private const float RowStride = 13.2f;
-        private const float RowFillWidth = 62f;
-        private const float RowFillBackWidth = 65f;
-        private const float RowFillHeight = 2.85f;
-        private const float RowFillBackHeight = 3.7f;
-        private const float RowLabelX = 52f;
-        private const float RowCountX = -55.5f;
-        private const float RowFillCenterX = -3.5f;
-        private const float HeaderTextSize = 5.8f;
-        private const float RowLabelTextSize = 4.2f;
-        private const float RowCountTextSize = 5.2f;
+        private const float HeaderHeight = 9.5f;
+        private const float HeaderRowGap = 2.6f;
+        private const float RowHeight = 13.5f;
+        private const float RowStride = 15.8f;
+        private const float RowFillWidth = 72f;
+        private const float RowFillBackWidth = 76f;
+        private const float RowFillHeight = 4.6f;
+        private const float RowFillBackHeight = 5.8f;
+        private const float RowNumberX = 59f;
+        private const float RowCountX = -56f;
+        private const float RowFillCenterX = 2f;
+        private const float HeaderTextSize = 7.4f;
+        private const float RowNumberTextSize = 9.5f;
+        private const float RowCountTextSize = 9.5f;
 
         private const int TextFontSize = 128;
+        // The bars themselves are drawn inside the mirror gallery tiles by
+        // DomeGalleryGlass.shader (which mirrors the tile/pitch geometry); the
+        // scoreboard only computes the per-column levels and streams them into
+        // the gallery material as the _EqualizerBars vector array.
         private const int EqualizerColumnCount = 120;
-        private const int EqualizerMaxTiles = 22;
-        private const float EqualizerCenterLatitude = 0.22f;
-        private const float EqualizerTileWidth = 8.2f;
-        private const float EqualizerTileHeight = 4.8f;
-        private const float EqualizerTileGap = 2.0f;
-        private const float EqualizerBaseY = -20f;
-        private const float EqualizerLineThickness = 0.58f;
+        private const int EqualizerMaxTiles = 24;
         private const float EqualizerBlueBandEnd = 0.24f;
+        // New tracks fade their skyline in over this window so the bars open
+        // small (songs start quiet) and grow with the music.
+        private const float EqualizerIntroSeconds = 12f;
+
+        private static readonly Color HaloColor = new Color(0.04f, 0.62f, 0.95f, 1f);
+        private static readonly int EqualizerBarsId = Shader.PropertyToID("_EqualizerBars");
 
         private readonly List<ArmyRow> rows = new();
         private readonly List<EqualizerColumn> equalizerColumns = new();
+        private readonly Vector4[] equalizerBarData = new Vector4[EqualizerColumnCount];
         private readonly Dictionary<int, Material> armyMaterials = new();
         private readonly float[] spectrumSamples = new float[SpectrumSampleCount];
 
         private MatchController match;
         private Font font;
         private StadiumVisualMetrics metrics;
+        private Transform chandelierRoot;
+        private float chandelierScale = 1f;
+        private float chandelierHang = 88f;
         private float nextScoreRefreshAt;
         private float nextEqualizerRefreshAt;
+        private bool musicWasPlaying;
+        private float songStartedAt = -1000f;
         private int builtArmyCount = -1;
         private Material panelMaterial;
         private Material rowBackMaterial;
         private Material capsuleMaterial;
         private Material fillBackMaterial;
         private Material hotPurpleRailMaterial;
+        private Material haloMaterial;
+        private Material bedGlowMaterial;
         private Material fontMaterial;
 
         public void Build(MatchController owner, ArenaLayout layout, float wallHeight)
@@ -99,11 +112,16 @@ namespace ArenaShooter
 
             font.RequestCharactersInTexture("ARMY COUNT0123456789", TextFontSize, FontStyle.Bold);
             metrics = AllOutWarStadiumVisuals.CreateMetrics(layout.CircularCenter);
+            var playfieldRadius = CalculatePlayfieldRadius(layout);
+            chandelierScale = Mathf.Clamp(playfieldRadius / 560f, 0.24f, 0.7f);
+            chandelierHang = Mathf.Clamp(playfieldRadius * 0.6f, 42f, 88f);
             panelMaterial = CreateUnlitMaterial("Dome Scoreboard Embedded Black Glass", new Color(0.0012f, 0.001f, 0.0058f, 1f), new Color(0.008f, 0.0015f, 0.024f, 1f));
             rowBackMaterial = CreateUnlitMaterial("Dome Scoreboard Row Black Glass", new Color(0.0024f, 0.002f, 0.010f, 1f), new Color(0.010f, 0.0015f, 0.022f, 1f));
             capsuleMaterial = CreateUnlitMaterial("Dome Scoreboard Label Capsule Glass", new Color(0.003f, 0.0025f, 0.013f, 1f), new Color(0.014f, 0.002f, 0.032f, 1f));
             fillBackMaterial = CreateUnlitMaterial("Dome Scoreboard Fill Back Glass", new Color(0.008f, 0.002f, 0.018f, 1f), new Color(0.012f, 0.0015f, 0.024f, 1f));
             hotPurpleRailMaterial = CreateUnlitMaterial("Dome Scoreboard Hot Purple Rail", new Color(1.06f, 0.04f, 2.35f, 1f), new Color(2.75f, 0.08f, 6.0f, 1f));
+            haloMaterial = CreateUnlitMaterial("Chandelier Music Halo Cyan", new Color(0.02f, 0.4f, 0.62f, 1f), new Color(0.05f, 1.1f, 1.7f, 1f));
+            bedGlowMaterial = CreateUnlitMaterial("Chandelier Board Bed Glow", new Color(0.17f, 0.03f, 0.36f, 1f), new Color(0.5f, 0.08f, 1.05f, 1f));
             fontMaterial = CreateFontMaterial();
 
             RebuildVisuals();
@@ -130,6 +148,11 @@ namespace ArenaShooter
             }
 
             UpdateEqualizer();
+
+            if (chandelierRoot != null)
+            {
+                chandelierRoot.Rotate(0f, ChandelierRotationDegreesPerSecond * Time.deltaTime, 0f);
+            }
         }
 
         private void RebuildVisuals()
@@ -141,6 +164,7 @@ namespace ArenaShooter
 
             rows.Clear();
             equalizerColumns.Clear();
+            chandelierRoot = null;
             builtArmyCount = match != null ? Mathf.Clamp(match.AllOutWarArmyCount, 0, MaxDisplayedArmies) : 0;
             if (builtArmyCount <= 0)
             {
@@ -156,23 +180,31 @@ namespace ArenaShooter
             var rowBlockHeight = RowHeight + Mathf.Max(0, builtArmyCount - 1) * RowStride;
             var boardHeight = BoardTopPadding + HeaderHeight + HeaderRowGap + rowBlockHeight + BoardBottomPadding;
 
+            var chandelier = new GameObject("Center Court Chandelier");
+            chandelier.transform.SetParent(transform, false);
+            chandelier.transform.localPosition = metrics.Center + Vector3.up * chandelierHang;
+            chandelier.transform.localScale = Vector3.one * chandelierScale;
+            chandelierRoot = chandelier.transform;
+
             for (var bank = 0; bank < BankCount; bank++)
             {
                 var angle = bank / (float)BankCount * Mathf.PI * 2f;
-                CreateScoreboard($"Dome Scoreboard {bank + 1}", new DomePatch(angle, BoardLatitude, 0f), BoardWidth, boardHeight);
+                CreateScoreboard($"Chandelier Scoreboard {bank + 1}", new DomePatch(angle, 0f, 0f), BoardWidth, boardHeight);
             }
+
+            CreateChandelierRig(chandelierRoot, boardHeight * ScoreboardLocalScale * 0.5f);
         }
 
         private void CreateScoreboard(string objectName, DomePatch patch, float boardWidth, float boardHeight)
         {
             var root = new GameObject(objectName);
-            root.transform.SetParent(transform, false);
+            root.transform.SetParent(chandelierRoot, false);
 
             var boardSize = new Vector2(boardWidth, boardHeight);
             CreateReferenceScoreboardFrame(root.transform, patch, boardSize);
 
             var headerY = boardHeight * 0.5f - BoardTopPadding - HeaderHeight * 0.5f;
-            CreateCurvedTextLabel("Header Text", root.transform, patch, "ARMY COUNT", new Vector2(0f, headerY), HeaderTextSize, TextAnchor.MiddleCenter, new Color(1f, 0.98f, 1f, 1f), ScoreboardTextInset);
+            CreateCurvedTextLabel("Header Text", root.transform, patch, "ARMY COUNT", new Vector2(0f, headerY), HeaderTextSize, TextAnchor.MiddleCenter, new Color(1f, 0.98f, 1f, 1f), BoardTextDepth);
 
             var rowStartY = headerY - HeaderHeight * 0.5f - HeaderRowGap - RowHeight * 0.5f;
             for (var army = 0; army < builtArmyCount; army++)
@@ -183,13 +215,13 @@ namespace ArenaShooter
 
         private void CreateReferenceScoreboardFrame(Transform parent, DomePatch patch, Vector2 boardSize)
         {
-            CreateCurvedRoundedPanel("Board Shadow Glass Bed", parent, patch, Vector2.zero, boardSize + new Vector2(7f, 4.2f), BoardCornerRadius + 2.2f, ScoreboardBackInset, panelMaterial);
-            CreateCurvedRoundedPanel("Board Black Glass", parent, patch, Vector2.zero, boardSize - new Vector2(3.2f, 3f), Mathf.Max(1.2f, BoardCornerRadius - 1.2f), ScoreboardPanelInset, panelMaterial);
+            CreateCurvedRoundedPanel("Board Glow Bed", parent, patch, Vector2.zero, boardSize + new Vector2(7f, 4.2f), BoardCornerRadius + 2.2f, BoardBedDepth, bedGlowMaterial);
+            CreateCurvedRoundedPanel("Board Black Glass", parent, patch, Vector2.zero, boardSize - new Vector2(3.2f, 3f), Mathf.Max(1.2f, BoardCornerRadius - 1.2f), BoardPanelDepth, panelMaterial);
 
+            // A single clean neon frame; a second inner border just smears into it at
+            // chandelier scale and steals contrast from the content.
             var outerBorderSize = boardSize + new Vector2(4.4f, 3.2f);
-            var innerBorderSize = outerBorderSize - Vector2.one * ((BoardOuterBorderThickness + BoardBorderGap) * 2f);
-            CreateCurvedRoundedBorder("Outer Neon Purple Border", parent, patch, Vector2.zero, outerBorderSize, BoardCornerRadius + 1.4f, BoardOuterBorderThickness, ScoreboardOuterBorderInset, hotPurpleRailMaterial);
-            CreateCurvedRoundedBorder("Inner Neon Purple Border", parent, patch, Vector2.zero, innerBorderSize, BoardCornerRadius - 0.2f, BoardInnerBorderThickness, ScoreboardInnerBorderInset, hotPurpleRailMaterial);
+            CreateCurvedRoundedBorder("Outer Neon Purple Border", parent, patch, Vector2.zero, outerBorderSize, BoardCornerRadius + 1.4f, BoardOuterBorderThickness, BoardOuterBorderDepth, hotPurpleRailMaterial);
         }
 
         private void CreateArmyRow(Transform parent, DomePatch patch, int army, float rowY)
@@ -197,20 +229,15 @@ namespace ArenaShooter
             var armyMaterial = GetArmyMaterial(army);
             var rowWidth = RowContentWidth;
             var rowSize = new Vector2(rowWidth, RowHeight);
-            CreateCurvedClippedPanel("Row Black Glass", parent, patch, new Vector2(0f, rowY), rowSize, 2.8f, ScoreboardRowInset, rowBackMaterial);
-
-            CreateCurvedClippedPanel("Army Label Capsule", parent, patch, new Vector2(RowLabelX, rowY), new Vector2(34f, 7.7f), 2.4f, ScoreboardDetailInset, capsuleMaterial);
+            CreateCurvedClippedPanel("Row Black Glass", parent, patch, new Vector2(0f, rowY), rowSize, 3.0f, BoardRowDepth, rowBackMaterial);
 
             var fillStartX = RowFillCenterX + RowFillWidth * 0.5f;
-            CreateCurvedClippedPanel("Fill Back", parent, patch, new Vector2(RowFillCenterX, rowY), new Vector2(RowFillBackWidth, RowFillBackHeight), 1.25f, ScoreboardDetailInset, fillBackMaterial);
-            var fill = CreateCurvedSolidRect("Fill", parent, patch, new Vector2(RowFillCenterX, rowY), new Vector2(RowFillWidth, RowFillHeight), ScoreboardFillInset, armyMaterial);
-
-            CreateCurvedClippedPanel("Army Count Capsule", parent, patch, new Vector2(RowCountX, rowY), new Vector2(25f, 8.2f), 2.5f, ScoreboardDetailInset, capsuleMaterial);
+            CreateCurvedClippedPanel("Fill Back", parent, patch, new Vector2(RowFillCenterX, rowY), new Vector2(RowFillBackWidth, RowFillBackHeight), 1.6f, BoardDetailDepth, fillBackMaterial);
+            var fill = CreateCurvedSolidRect("Fill", parent, patch, new Vector2(RowFillCenterX, rowY), new Vector2(RowFillWidth, RowFillHeight), BoardFillDepth, armyMaterial);
 
             var accent = AllOutWarArmyVisuals.GetAccent(army);
-            CreateCurvedTextLabel("Army Label Prefix", parent, patch, "ARMY", new Vector2(RowLabelX + 4.9f, rowY), RowLabelTextSize, TextAnchor.MiddleCenter, new Color(1f, 0.96f, 1f, 1f), ScoreboardTextInset);
-            CreateCurvedTextLabel("Army Label Number", parent, patch, army.ToString(), new Vector2(RowLabelX - 10.2f, rowY), RowLabelTextSize * 1.08f, TextAnchor.MiddleCenter, new Color(accent.r * 1.45f, accent.g * 1.45f, accent.b * 1.45f, 1f), ScoreboardTextInset);
-            var count = CreateCurvedTextLabel("Army Count", parent, patch, "000", new Vector2(RowCountX, rowY), RowCountTextSize, TextAnchor.MiddleCenter, new Color(1f, 0.98f, 0.96f, 1f), ScoreboardTextInset);
+            CreateCurvedTextLabel("Army Number", parent, patch, army.ToString(), new Vector2(RowNumberX, rowY), RowNumberTextSize, TextAnchor.MiddleCenter, new Color(accent.r * 1.5f, accent.g * 1.5f, accent.b * 1.5f, 1f), BoardTextDepth);
+            var count = CreateCurvedTextLabel("Army Count", parent, patch, "000", new Vector2(RowCountX, rowY), RowCountTextSize, TextAnchor.MiddleCenter, new Color(1f, 0.99f, 0.97f, 1f), BoardTextDepth);
 
             rows.Add(new ArmyRow
             {
@@ -227,45 +254,139 @@ namespace ArenaShooter
             });
         }
 
+        private void CreateChandelierRig(Transform parent, float boardHalfHeight)
+        {
+            var plateHalf = ChandelierFaceOffset + ChandelierPlateOverhang;
+            var topY = boardHalfHeight + 1.1f;
+            var bottomY = -boardHalfHeight - 1.1f;
+            var cornerRadius = ChandelierFaceOffset * 1.41421f;
+
+            CreateChandelierBlock("Chandelier Top Plate", parent, Vector3.up * topY, new Vector3(plateHalf * 2f, 2.2f, plateHalf * 2f), Quaternion.identity, panelMaterial);
+            CreateChandelierBlock("Chandelier Bottom Plate", parent, Vector3.up * bottomY, new Vector3(plateHalf * 2f, 2.2f, plateHalf * 2f), Quaternion.identity, panelMaterial);
+
+            for (var corner = 0; corner < 4; corner++)
+            {
+                var angle = (corner + 0.5f) / 4f * Mathf.PI * 2f;
+                var direction = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
+                // The light strip mounts just past the pillar's outer corner edge.
+                CreateChandelierBlock($"Chandelier Corner Pillar {corner + 1}", parent, direction * cornerRadius, new Vector3(8f, boardHalfHeight * 2f + 4f, 8f), Quaternion.Euler(0f, 45f, 0f), capsuleMaterial);
+                CreateChandelierBlock($"Chandelier Corner Light {corner + 1}", parent, direction * (cornerRadius + 7.2f), new Vector3(3f, boardHalfHeight * 2f + 2f, 3f), Quaternion.Euler(0f, 45f, 0f), hotPurpleRailMaterial);
+            }
+
+            CreateChandelierRing("Chandelier Crown Ring", parent, topY + 1.6f, plateHalf - 5.5f, plateHalf - 1.5f, hotPurpleRailMaterial);
+            CreateChandelierRing("Chandelier Music Halo", parent, bottomY - 1.6f, plateHalf - 5.5f, plateHalf - 1.5f, haloMaterial);
+            CreateChandelierRing("Chandelier Under Hub", parent, bottomY - 1.3f, 1.2f, 4.5f, hotPurpleRailMaterial);
+
+            // The rig is built in chandelier-local space, which the root scales down on
+            // small maps — divide so the mast and cables still reach the dome apex.
+            var apexLocalY = (metrics.BaseY + metrics.Height * Mathf.Sin(AllOutWarStadiumVisuals.LatitudeToTheta(1f)) - chandelierHang) / Mathf.Max(0.1f, chandelierScale);
+            var mastBottom = topY + 1f;
+            var mastHeight = Mathf.Max(2f, apexLocalY - mastBottom);
+            CreateChandelierBlock("Chandelier Mast", parent, Vector3.up * (mastBottom + mastHeight * 0.5f), new Vector3(3.4f, mastHeight, 3.4f), Quaternion.identity, capsuleMaterial);
+            CreateChandelierRing("Chandelier Mast Collar Low", parent, mastBottom + mastHeight * 0.3f, 2.4f, 4.2f, hotPurpleRailMaterial);
+            CreateChandelierRing("Chandelier Mast Collar High", parent, mastBottom + mastHeight * 0.7f, 2.4f, 4.2f, hotPurpleRailMaterial);
+
+            var anchor = Vector3.up * (apexLocalY - 1.5f);
+            for (var corner = 0; corner < 4; corner++)
+            {
+                var angle = (corner + 0.5f) / 4f * Mathf.PI * 2f;
+                var start = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * (plateHalf * 0.82f) + Vector3.up * topY;
+                var delta = anchor - start;
+                CreateChandelierBlock($"Chandelier Cable {corner + 1}", parent, (start + anchor) * 0.5f, new Vector3(1.4f, delta.magnitude, 1.4f), Quaternion.FromToRotation(Vector3.up, delta.normalized), hotPurpleRailMaterial);
+            }
+        }
+
+        private static float CalculatePlayfieldRadius(ArenaLayout layout)
+        {
+            var radius = 80f;
+            if (layout?.RoomCenters == null)
+            {
+                return radius;
+            }
+
+            foreach (var room in layout.RoomCenters.Values)
+            {
+                var delta = room - layout.CircularCenter;
+                delta.y = 0f;
+                radius = Mathf.Max(radius, delta.magnitude + 30f);
+            }
+
+            return radius;
+        }
+
+        private GameObject CreateChandelierBlock(string objectName, Transform parent, Vector3 localPosition, Vector3 localScale, Quaternion localRotation, Material material)
+        {
+            var block = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            block.name = objectName;
+            var collider = block.GetComponent<Collider>();
+            if (collider != null)
+            {
+                Destroy(collider);
+            }
+
+            block.transform.SetParent(parent, false);
+            block.transform.localPosition = localPosition;
+            block.transform.localRotation = localRotation;
+            block.transform.localScale = localScale;
+            ConfigureRenderer(block.GetComponent<MeshRenderer>(), material);
+            return block;
+        }
+
+        private GameObject CreateChandelierRing(string objectName, Transform parent, float y, float innerRadius, float outerRadius, Material material)
+        {
+            const int segments = 48;
+            var ring = new GameObject(objectName);
+            ring.transform.SetParent(parent, false);
+            var vertices = new Vector3[(segments + 1) * 2];
+            var triangles = new int[segments * 6];
+            for (var i = 0; i <= segments; i++)
+            {
+                var angle = i / (float)segments * Mathf.PI * 2f;
+                var direction = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
+                vertices[i * 2] = direction * innerRadius + Vector3.up * y;
+                vertices[i * 2 + 1] = direction * outerRadius + Vector3.up * y;
+            }
+
+            for (var i = 0; i < segments; i++)
+            {
+                var vertex = i * 2;
+                var triangle = i * 6;
+                triangles[triangle] = vertex;
+                triangles[triangle + 1] = vertex + 1;
+                triangles[triangle + 2] = vertex + 2;
+                triangles[triangle + 3] = vertex + 1;
+                triangles[triangle + 4] = vertex + 3;
+                triangles[triangle + 5] = vertex + 2;
+            }
+
+            var mesh = new Mesh { name = $"{objectName} Mesh" };
+            mesh.vertices = vertices;
+            mesh.triangles = triangles;
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            ring.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var renderer = ring.AddComponent<MeshRenderer>();
+            ConfigureRenderer(renderer, material);
+            return ring;
+        }
+
         private void CreateEqualizer()
         {
-            var root = new GameObject("Embedded Dome Equalizer Bars");
-            root.transform.SetParent(transform, false);
-
+            // No geometry: the gallery glass shader draws the bars inside the
+            // mirror tiles. This just seeds the per-column skyline state that
+            // UpdateEqualizer animates and streams into the gallery material.
+            // (The per-column colour ramp lives in the shader as EqualizerRamp.)
             for (var columnIndex = 0; columnIndex < EqualizerColumnCount; columnIndex++)
             {
                 var colorT = EqualizerColumnCount > 1 ? columnIndex / (float)(EqualizerColumnCount - 1) : 0f;
                 var behaviorT = GetEqualizerBehaviorT(colorT);
-                var phi = columnIndex / (float)EqualizerColumnCount * Mathf.PI * 2f;
-                var patch = new DomePatch(phi, EqualizerCenterLatitude, 0f);
-                var skylineTiles = GetEqualizerSkylineTiles(behaviorT, columnIndex);
-
-                var color = GetEqualizerColor(colorT);
-                var material = CreateUnlitMaterial($"Dome Equalizer Column {columnIndex + 1}", color * 0.72f, color * 2.15f);
-
-                var columnObject = new GameObject($"Equalizer Column {columnIndex + 1:000}");
-                columnObject.transform.SetParent(root.transform, false);
-                var mesh = new Mesh { name = $"Equalizer Column {columnIndex + 1:000} Mesh" };
-                columnObject.AddComponent<MeshFilter>().sharedMesh = mesh;
-                var renderer = columnObject.AddComponent<MeshRenderer>();
-                ConfigureRenderer(renderer, material);
-
-                var column = new EqualizerColumn
+                equalizerColumns.Add(new EqualizerColumn
                 {
-                    Patch = patch,
-                    Mesh = mesh,
-                    Material = material,
-                    BaseColor = color,
-                    LocalX = 0f,
-                    SkylineTiles = skylineTiles,
+                    SkylineTiles = GetEqualizerSkylineTiles(behaviorT, columnIndex),
                     BehaviorT = behaviorT,
                     Phase = columnIndex * 0.371f + 4.7f,
-                    CurrentLevel = 0f,
-                    LastActiveTiles = -1
-                };
-
-                equalizerColumns.Add(column);
-                WriteEqualizerColumnMesh(column, 0);
+                    CurrentLevel = 0f
+                });
             }
         }
 
@@ -278,8 +399,20 @@ namespace ArenaShooter
             }
 
             nextEqualizerRefreshAt = now + EqualizerRefreshInterval;
+            if (equalizerColumns.Count == 0)
+            {
+                return;
+            }
+
             var audio = ArenaAudio.Instance;
             var musicPlaying = audio != null && audio.IsGameplayMusicPlaying;
+            if (musicPlaying && !musicWasPlaying)
+            {
+                songStartedAt = now;
+            }
+
+            musicWasPlaying = musicPlaying;
+            var introRamp = Mathf.Clamp01((now - songStartedAt) / EqualizerIntroSeconds);
             var hasSpectrum = musicPlaying && audio.TryGetGameplayMusicSpectrum(spectrumSamples);
             var hasStrongSpectrum = false;
             if (hasSpectrum)
@@ -294,6 +427,7 @@ namespace ArenaShooter
                 }
             }
 
+            var levelSum = 0f;
             for (var i = 0; i < equalizerColumns.Count; i++)
             {
                 var column = equalizerColumns[i];
@@ -320,18 +454,36 @@ namespace ArenaShooter
 
                 var attack = target > column.CurrentLevel ? 0.72f : 0.24f;
                 column.CurrentLevel = Mathf.Lerp(column.CurrentLevel, target, attack);
-                var skylineMotion = Mathf.Lerp(0.32f, 1f, column.CurrentLevel);
-                var activeTiles = musicPlaying && column.SkylineTiles > 0
+                // The skyline tracks the music level directly (no standing floor)
+                // and a fresh track ramps in from small; in the intermission the
+                // columns sink to zero and the threshold below removes them
+                // outright — CeilToInt on the decaying residue used to pin one
+                // tile alive around the whole hemisphere after the song ended.
+                var skylineMotion = column.CurrentLevel * (musicPlaying ? Mathf.Lerp(0.35f, 1f, introRamp) : 1f);
+                var activeTiles = column.SkylineTiles > 0 && skylineMotion > 0.035f
                     ? Mathf.Clamp(Mathf.CeilToInt(skylineMotion * column.SkylineTiles), 1, column.SkylineTiles)
                     : 0;
-                if (activeTiles != column.LastActiveTiles)
-                {
-                    WriteEqualizerColumnMesh(column, activeTiles);
-                }
 
+                // Brightness multiplier on the shader's colour ramp; matches the
+                // old mesh bars' base-colour level plus emission glow.
                 var glow = musicPlaying ? Mathf.Lerp(1.15f, 3.6f, column.CurrentLevel) : 0.55f;
-                SetMaterialColor(column.Material, column.BaseColor * Mathf.Lerp(0.48f, 1.05f, column.CurrentLevel));
-                SetMaterialEmission(column.Material, column.BaseColor * glow);
+                var intensity = Mathf.Lerp(0.48f, 1.05f, column.CurrentLevel) + glow;
+                equalizerBarData[i] = new Vector4(activeTiles, intensity, 0f, 0f);
+                levelSum += column.CurrentLevel;
+            }
+
+            var paneMaterial = ShieldDomeBackdrop.GalleryPaneMaterial;
+            if (paneMaterial != null)
+            {
+                paneMaterial.SetVectorArray(EqualizerBarsId, equalizerBarData);
+            }
+
+            if (haloMaterial != null && equalizerColumns.Count > 0)
+            {
+                var average = levelSum / equalizerColumns.Count;
+                var pulse = musicPlaying ? Mathf.Lerp(0.3f, 1f, average) : 0.22f;
+                SetMaterialColor(haloMaterial, HaloColor * pulse);
+                SetMaterialEmission(haloMaterial, HaloColor * (musicPlaying ? Mathf.Lerp(0.8f, 3.4f, average) : 0.45f));
             }
         }
 
@@ -364,7 +516,7 @@ namespace ArenaShooter
                     else
                     {
                         var center = new Vector2(row.FillStartX + row.FillDirection * width * 0.5f, row.FillY);
-                        WriteCurvedSolidRectMesh(row.FillMesh, row.Patch, center, new Vector2(width, RowFillHeight), ScoreboardFillInset);
+                        WriteCurvedSolidRectMesh(row.FillMesh, row.Patch, center, new Vector2(width, RowFillHeight), BoardFillDepth);
                     }
                 }
 
@@ -730,25 +882,6 @@ namespace ArenaShooter
             mesh.RecalculateBounds();
         }
 
-        private void WriteEqualizerColumnMesh(EqualizerColumn column, int activeTiles)
-        {
-            column.LastActiveTiles = activeTiles;
-            var vertices = new List<Vector3>(activeTiles * 48);
-            var triangles = new List<int>(activeTiles * 72);
-            for (var tile = 0; tile < activeTiles; tile++)
-            {
-                var tileCenter = new Vector2(column.LocalX, EqualizerBaseY + tile * (EqualizerTileHeight + EqualizerTileGap));
-                AddDomeHollowRectGeometry(vertices, triangles, column.Patch, tileCenter, new Vector2(EqualizerTileWidth, EqualizerTileHeight), EqualizerLineThickness, DetailRadiusInset - 0.32f);
-            }
-
-            WriteMesh(column.Mesh, vertices, triangles);
-        }
-
-        private void AddDomeHollowRectGeometry(List<Vector3> vertices, List<int> triangles, DomePatch patch, Vector2 center, Vector2 size, float thickness, float radiusInset)
-        {
-            AddDomeClippedBorderGeometry(vertices, triangles, patch, center, size, 0f, thickness, radiusInset);
-        }
-
         private void AddScoreboardRoundedBorderGeometry(List<Vector3> vertices, List<int> triangles, DomePatch patch, Vector2 center, Vector2 size, float cornerRadius, float thickness, float radiusInset)
         {
             var borderInset = Mathf.Min(thickness, Mathf.Min(size.x, size.y) * 0.45f);
@@ -908,65 +1041,15 @@ namespace ArenaShooter
             AddClosedRingTriangles(triangles, baseIndex, (vertices.Count - baseIndex) / 2);
         }
 
-        private void AddDomeClippedBorderGeometry(List<Vector3> vertices, List<int> triangles, DomePatch patch, Vector2 center, Vector2 size, float cornerCut, float thickness, float radiusInset)
+        private Vector3 ScoreboardPoint(DomePatch patch, Vector2 localPosition, float depth)
         {
-            var borderInset = Mathf.Min(thickness, Mathf.Min(size.x, size.y) * 0.45f);
-            if (borderInset <= 0.001f)
-            {
-                return;
-            }
-
-            var innerSize = new Vector2(size.x - borderInset * 2f, size.y - borderInset * 2f);
-            if (innerSize.x <= 0.001f || innerSize.y <= 0.001f)
-            {
-                return;
-            }
-
-            var clipped = cornerCut > 0.001f;
-            var outerCut = ClampCornerCut(size, cornerCut, clipped);
-            var innerCut = ClampCornerCut(innerSize, clipped ? Mathf.Max(0.001f, cornerCut - borderInset) : 0f, clipped);
-            var outerCorners = GetClippedRectCorners(size, outerCut, clipped);
-            var innerCorners = GetClippedRectCorners(innerSize, innerCut, clipped);
-            var baseIndex = vertices.Count;
-
-            for (var cornerIndex = 0; cornerIndex < outerCorners.Length; cornerIndex++)
-            {
-                var nextCornerIndex = (cornerIndex + 1) % outerCorners.Length;
-                var outerStart = outerCorners[cornerIndex];
-                var outerEnd = outerCorners[nextCornerIndex];
-                var innerStart = innerCorners[cornerIndex];
-                var innerEnd = innerCorners[nextCornerIndex];
-                var edgeLength = Mathf.Max(Vector2.Distance(outerStart, outerEnd), Vector2.Distance(innerStart, innerEnd));
-                var segments = Mathf.Clamp(Mathf.CeilToInt(edgeLength / MeshSegmentLength), 1, 32);
-
-                for (var i = 0; i < segments; i++)
-                {
-                    var t = i / (float)segments;
-                    vertices.Add(DomePoint(patch, center + Vector2.Lerp(outerStart, outerEnd, t), radiusInset));
-                    vertices.Add(DomePoint(patch, center + Vector2.Lerp(innerStart, innerEnd, t), radiusInset));
-                }
-            }
-
-            AddClosedRingTriangles(triangles, baseIndex, (vertices.Count - baseIndex) / 2);
-        }
-
-        private Vector3 ScoreboardPoint(DomePatch patch, Vector2 localPosition, float radiusInset)
-        {
+            // Chandelier-local space: each bank is a flat vertical face of the
+            // centerhung box, like a real arena display. patch.Phi picks the face
+            // direction; depth layers panels toward the viewer.
             var rolled = patch.Roll(ScaleScoreboardLocalPosition(localPosition));
-            var centerTheta = AllOutWarStadiumVisuals.LatitudeToTheta(patch.Latitude);
-            var bendRadius = Mathf.Max(1f, metrics.Radius * Mathf.Cos(centerTheta));
-            var centerY = metrics.BaseY + metrics.Height * Mathf.Sin(centerTheta);
-            var verticalScale = GetScoreboardVerticalWorldScale(patch.Latitude);
-            var verticalOffset = rolled.y * verticalScale;
-            var monitorRadius = Mathf.Max(1f, bendRadius + ScoreboardMonitorMountInset);
-            var tiltRadians = ScoreboardMonitorDownTiltDegrees * Mathf.Deg2Rad;
-            var surfaceRadius = Mathf.Max(1f, monitorRadius + radiusInset - verticalOffset * Mathf.Sin(tiltRadians));
-            var phi = patch.Phi + rolled.x / monitorRadius;
-            var point = metrics.Center + new Vector3(
-                Mathf.Cos(phi) * surfaceRadius,
-                centerY + verticalOffset * Mathf.Cos(tiltRadians),
-                Mathf.Sin(phi) * surfaceRadius);
-            return ClampScoreboardPointInsideDome(point, radiusInset);
+            var outward = new Vector3(Mathf.Cos(patch.Phi), 0f, Mathf.Sin(patch.Phi));
+            var right = new Vector3(Mathf.Sin(patch.Phi), 0f, -Mathf.Cos(patch.Phi));
+            return outward * (ChandelierFaceOffset + depth) + right * rolled.x + Vector3.up * rolled.y;
         }
 
         private static Vector2 ScaleScoreboardLocalPosition(Vector2 localPosition)
@@ -982,40 +1065,6 @@ namespace ArenaShooter
             var flatRadius = Mathf.Max(1f, metrics.Radius * Mathf.Cos(theta));
             var phi = patch.Phi + rolled.x / flatRadius;
             return AllOutWarStadiumVisuals.DomePoint(metrics, latitude, phi, radiusInset);
-        }
-
-        private float GetScoreboardVerticalWorldScale(float latitude)
-        {
-            var centerTheta = AllOutWarStadiumVisuals.LatitudeToTheta(latitude);
-            var sampleTheta = AllOutWarStadiumVisuals.LatitudeToTheta(Mathf.Clamp01(latitude + 1f / DomeVerticalUnitsPerLatitude));
-            return Mathf.Max(0.1f, metrics.Height * (Mathf.Sin(sampleTheta) - Mathf.Sin(centerTheta)));
-        }
-
-        private Vector3 ClampScoreboardPointInsideDome(Vector3 point, float radiusInset)
-        {
-            var local = point - metrics.Center;
-            var maxTheta = AllOutWarStadiumVisuals.LatitudeToTheta(1f);
-            var maxNormalizedHeight = Mathf.Sin(maxTheta);
-            var maxY = metrics.BaseY + metrics.Height * maxNormalizedHeight - ScoreboardDomeClearance;
-            if (local.y > maxY)
-            {
-                local.y = maxY;
-            }
-
-            var normalizedHeight = Mathf.Clamp((local.y - metrics.BaseY) / Mathf.Max(0.001f, metrics.Height), 0f, maxNormalizedHeight);
-            var theta = Mathf.Asin(normalizedHeight);
-            var effectiveInset = Mathf.Min(radiusInset, -ScoreboardDomeClearance);
-            var maxRadius = Mathf.Max(1f, metrics.Radius + effectiveInset) * Mathf.Cos(theta);
-            var horizontal = new Vector2(local.x, local.z);
-            var horizontalMagnitude = horizontal.magnitude;
-            if (horizontalMagnitude > maxRadius && horizontalMagnitude > 0.001f)
-            {
-                var scale = maxRadius / horizontalMagnitude;
-                local.x *= scale;
-                local.z *= scale;
-            }
-
-            return metrics.Center + local;
         }
 
         private static void AddClosedRingTriangles(List<int> triangles, int baseIndex, int pairCount)
@@ -1143,6 +1192,9 @@ namespace ArenaShooter
             return Mathf.Exp(-0.5f * normalized * normalized);
         }
 
+        // Reference implementation of the per-column colour ramp; the live bars
+        // are coloured by its mirror in DomeGalleryGlass.shader (EqualizerRamp).
+        // Kept (and pinned by EditMode tests) so ramp changes start here.
         private static Color GetEqualizerColor(float t)
         {
             if (t < EqualizerBlueBandEnd)
@@ -1403,16 +1455,10 @@ namespace ArenaShooter
 
         private sealed class EqualizerColumn
         {
-            public DomePatch Patch;
-            public Mesh Mesh;
-            public Material Material;
-            public Color BaseColor;
-            public float LocalX;
             public int SkylineTiles;
             public float BehaviorT;
             public float Phase;
             public float CurrentLevel;
-            public int LastActiveTiles;
         }
     }
 }

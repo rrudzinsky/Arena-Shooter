@@ -78,6 +78,7 @@ namespace ArenaShooter
         };
         private GameObject matchRoot;
         private ArenaTheme theme;
+        internal ArenaTheme Theme => theme;
         private PrototypeHud hud;
         private InGamePauseMenu pauseMenu;
         private int pauseMenuInputConsumedFrame = -1;
@@ -3185,7 +3186,7 @@ namespace ArenaShooter
             viewModel.Build(cameraObject.transform, theme);
 
             var weapons = player.AddComponent<WeaponInventory>();
-            weapons.Configure(playerCombatant, viewModel.Muzzle, theme.Beam);
+            weapons.Configure(playerCombatant, viewModel.Muzzle, theme.Beam, theme);
             weapons.ConfigureViewModel(viewModel);
             playerWeapons = weapons;
 
@@ -3803,7 +3804,7 @@ namespace ArenaShooter
             var muzzle = blasterRig.Build(theme);
 
             var weapons = droid.AddComponent<WeaponInventory>();
-            weapons.Configure(health, muzzle.transform, theme.Beam);
+            weapons.Configure(health, muzzle.transform, theme.Beam, theme);
             weapons.Equip(new WeaponDefinition
             {
                 DisplayName = teamId >= 0 ? "Army Blaster" : "Droid Blaster",
@@ -3920,7 +3921,7 @@ namespace ArenaShooter
             var muzzle = blasterRig.Build(theme);
 
             var weapons = companion.AddComponent<WeaponInventory>();
-            weapons.Configure(health, muzzle.transform, theme.Beam);
+            weapons.Configure(health, muzzle.transform, theme.Beam, theme);
             weapons.Equip(new WeaponDefinition
             {
                 DisplayName = "Rifleman Blaster",
@@ -4265,7 +4266,7 @@ namespace ArenaShooter
             muzzle.transform.localPosition = new Vector3(0f, 0.62f, 0.28f);
 
             var weapons = opponent.AddComponent<WeaponInventory>();
-            weapons.Configure(opponentCombatant, muzzle.transform, theme.Beam);
+            weapons.Configure(opponentCombatant, muzzle.transform, theme.Beam, theme);
 
             var ai = opponent.AddComponent<OpponentController>();
             ai.Configure(this, layout, player);
@@ -5508,17 +5509,20 @@ namespace ArenaShooter
 
         private GameObject CreateWeaponPickup(Vector3 position)
         {
-            var pickup = new GameObject("Pulse Pistol Pickup");
+            // each weapon spawn rolls a fresh gun, so a taken pistol can respawn as
+            // a shotgun or grenade and vice versa
+            var weapon = WeaponCatalog.CreateRandomDrop();
+            var pickup = new GameObject($"{weapon.DisplayName} Pickup");
             pickup.transform.SetParent(matchRoot.transform, false);
             pickup.transform.position = position;
-            PickupVisuals.BuildGunPickup(pickup.transform, theme);
+            PickupVisuals.BuildGunPickup(pickup.transform, theme, weapon.ModelKind);
 
             var collider = pickup.AddComponent<SphereCollider>();
             collider.isTrigger = true;
             collider.radius = 0.9f;
 
             var pickupBehaviour = pickup.AddComponent<WeaponPickup>();
-            pickupBehaviour.Configure(this, new WeaponDefinition());
+            pickupBehaviour.Configure(this, weapon);
             activePickups.Add(pickupBehaviour);
             return pickup;
         }

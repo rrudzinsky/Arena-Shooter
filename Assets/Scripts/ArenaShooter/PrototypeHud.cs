@@ -14,6 +14,9 @@ namespace ArenaShooter
         private Text shieldValueText;
         private Text ammoValueText;
         private Text deployableText;
+        private Text weaponNameText;
+        private Text holsteredWeaponText;
+        private Text grenadeCountText;
         private Text scrapValueText;
         private Text scrapLabelText;
         private Text fabricatorTitleText;
@@ -69,7 +72,7 @@ namespace ArenaShooter
         private const float HealthPanelWidth = 378f;
         private const float HealthPanelHeight = 96f;
         private const float AmmoPanelWidth = 318f;
-        private const float AmmoPanelHeight = 92f;
+        private const float AmmoPanelHeight = 130f;
         private const float ScrapPanelWidth = 238f;
         private const float ScrapPanelHeight = 60f;
         private const float AllOutWarPanelWidth = 760f;
@@ -333,6 +336,26 @@ namespace ArenaShooter
                 }
 
                 ammoValueText.text = playerWeapons.HasWeapon ? playerWeapons.Ammo.ToString("000") : "---";
+                if (weaponNameText != null)
+                {
+                    weaponNameText.text = playerWeapons.HasWeapon ? playerWeapons.WeaponName.ToUpperInvariant() : "UNARMED";
+                }
+
+                if (holsteredWeaponText != null)
+                {
+                    var holstered = playerWeapons.HolsteredWeaponName;
+                    holsteredWeaponText.text = holstered != null ? $"[X] SWAP: {holstered.ToUpperInvariant()}" : "";
+                }
+
+                if (grenadeCountText != null)
+                {
+                    var grenades = playerWeapons.GrenadeCount;
+                    grenadeCountText.text = grenades > 0 ? $"[G] GRENADES x{grenades}" : "";
+                    grenadeCountText.color = grenades > 0
+                        ? new Color(1f, 0.62f, 0.12f, 0.95f)
+                        : new Color(0.32f, 0.4f, 0.44f, 0.7f);
+                }
+
                 var healthColor = healthRatio <= 0.28f ? new Color(1f, 0.04f, 0.04f, 1f) : new Color(0.92f, 0.05f, 0.08f, 0.98f);
                 var shieldColor = shieldRatio > 0f ? new Color(0.1f, 0.62f, 1f, 0.96f) : new Color(0.02f, 0.08f, 0.13f, 0.38f);
                 var ammoLow = playerWeapons.HasWeapon && playerWeapons.Ammo <= Mathf.Max(3, Mathf.CeilToInt(playerWeapons.MaxAmmo * 0.2f));
@@ -421,11 +444,15 @@ namespace ArenaShooter
             AddCyberFrame(panel.transform, AmmoPanelWidth, AmmoPanelHeight, new Color(1f, 0.72f, 0.16f, 0.88f), new Color(0.08f, 0.82f, 1f, 0.62f), true);
             ammoAccent = CreateImage("Ammo Amber Side Pulse", panel.transform, new Color(1f, 0.72f, 0.16f, 0.9f), new Vector2(-18f, 18f), new Vector2(5f, 56f), new Vector2(1f, 0f), new Vector2(1f, 0f), new Vector2(1f, 0f));
             ammoTrim = CreateImage("Ammo Top Glow", panel.transform, new Color(0.08f, 0.82f, 1f, 0.52f), new Vector2(-42f, -13f), new Vector2(214f, 2f), new Vector2(1f, 1f), new Vector2(1f, 1f), new Vector2(1f, 1f));
-            var label = CreateTextInPanel("Ammo Label", panel.transform, "PULSE", new Vector2(-24f, -14f), TextAnchor.UpperRight, 13, new Vector2(90f, 20f));
-            label.color = new Color(0.54f, 0.92f, 1f, 0.82f);
+            weaponNameText = CreateTextInPanel("Ammo Label", panel.transform, "UNARMED", new Vector2(-24f, -14f), TextAnchor.UpperRight, 13, new Vector2(190f, 20f));
+            weaponNameText.color = new Color(0.54f, 0.92f, 1f, 0.82f);
             weaponIcon = CreateArtworkImage("Equipped Weapon Silhouette", panel.transform, "UI/HudPistolIcon", new Vector2(-184f, -51f), new Vector2(122f, 58f), new Vector2(1f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 0.5f));
             ammoValueText = CreateTextInPanel("Ammo Value", panel.transform, "---", new Vector2(-24f, -42f), TextAnchor.UpperRight, 36, new Vector2(118f, 42f));
-            deployableText = CreateTextInPanel("Deployable Slot", panel.transform, "NO DEPLOYABLE", new Vector2(-24f, -76f), TextAnchor.UpperRight, 12, new Vector2(210f, 18f));
+            holsteredWeaponText = CreateTextInPanel("Holstered Weapon", panel.transform, "", new Vector2(-24f, -80f), TextAnchor.UpperRight, 12, new Vector2(260f, 18f));
+            holsteredWeaponText.color = new Color(0.42f, 0.62f, 0.72f, 0.8f);
+            grenadeCountText = CreateTextInPanel("Grenade Count", panel.transform, "", new Vector2(-24f, -96f), TextAnchor.UpperRight, 12, new Vector2(260f, 18f));
+            grenadeCountText.color = new Color(0.32f, 0.4f, 0.44f, 0.7f);
+            deployableText = CreateTextInPanel("Deployable Slot", panel.transform, "NO DEPLOYABLE", new Vector2(-24f, -112f), TextAnchor.UpperRight, 12, new Vector2(210f, 18f));
             deployableText.color = new Color(0.28f, 0.36f, 0.4f, 0.72f);
         }
 

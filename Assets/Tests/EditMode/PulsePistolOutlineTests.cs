@@ -177,6 +177,15 @@ public sealed class PulsePistolOutlineTests
             Assert.That((sightRenderer.renderingLayerMask & GetFirstPersonPistolSightRenderingLayer()), Is.Not.EqualTo(0u), sightRenderer.name);
             Assert.That((sightRenderer.renderingLayerMask & GetDefaultRenderingLayer()), Is.EqualTo(0u), sightRenderer.name);
             Assert.That((sightRenderer.renderingLayerMask & GetFirstPersonWeaponOccluderRenderingLayer()), Is.Not.EqualTo(0u), sightRenderer.name);
+
+            // neon accents on the sights (e.g. the fiber-optic style cyan glow dot) keep the
+            // sight outline band but intentionally use an emissive theme material
+            if (RendererMetadataContains(sightRenderer, camera.transform, "glow") ||
+                RendererMetadataContains(sightRenderer, camera.transform, "cyan"))
+            {
+                continue;
+            }
+
             foreach (var material in sightRenderer.sharedMaterials)
             {
                 Assert.That(material, Is.SameAs(bodyMaterial), sightRenderer.name);

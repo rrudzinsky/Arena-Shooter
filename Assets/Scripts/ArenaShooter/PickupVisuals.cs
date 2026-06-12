@@ -4,8 +4,18 @@ namespace ArenaShooter
 {
     public static class PickupVisuals
     {
-        public static void BuildGunPickup(Transform parent, ArenaTheme theme)
+        public static void BuildGunPickup(Transform parent, ArenaTheme theme, WeaponModelKind kind = WeaponModelKind.PulsePistol)
         {
+            switch (kind)
+            {
+                case WeaponModelKind.ScatterShotgun:
+                    BuildShotgunPickup(parent, theme);
+                    return;
+                case WeaponModelKind.PlasmaGrenade:
+                    BuildGrenadePickup(parent, theme);
+                    return;
+            }
+
             var model = CreateModelRoot(parent);
             if (PulsePistolAsset.TryBuildPickupModel(model, theme))
             {
@@ -19,6 +29,41 @@ namespace ArenaShooter
             CreatePrimitive("Pickup Gun Core", PrimitiveType.Cube, theme.Pickup, model, new Vector3(0.04f, 0.09f, 0f), new Vector3(0.18f, 0.08f, 0.24f), Vector3.zero);
             DroidRenderSetup.Apply(model.gameObject, StylizedOutlineCategory.Gun);
             CreateGlowStand(parent, theme.NeonA, new Color(0.1f, 0.85f, 1f), 4.2f);
+        }
+
+        private static void BuildShotgunPickup(Transform parent, ArenaTheme theme)
+        {
+            var model = CreateModelRoot(parent);
+            if (ShotgunAsset.TryBuildPickupModel(model, theme))
+            {
+                CreateGlowStand(parent, theme.NeonB, new Color(1f, 0.2f, 0.95f), 4.2f);
+                return;
+            }
+
+            CreatePrimitive("Pickup Shotgun Body", PrimitiveType.Cube, theme.Wall, model, new Vector3(0f, 0f, 0f), new Vector3(0.95f, 0.2f, 0.2f), Vector3.zero);
+            CreatePrimitive("Pickup Shotgun Barrels", PrimitiveType.Cube, theme.Wall, model, new Vector3(0.5f, 0.05f, 0f), new Vector3(0.42f, 0.1f, 0.17f), Vector3.zero);
+            CreatePrimitive("Pickup Shotgun Muzzle", PrimitiveType.Cube, theme.NeonA, model, new Vector3(0.72f, 0.05f, 0f), new Vector3(0.03f, 0.06f, 0.15f), Vector3.zero);
+            CreatePrimitive("Pickup Shotgun Pump", PrimitiveType.Cube, theme.Pillar, model, new Vector3(0.3f, -0.12f, 0f), new Vector3(0.26f, 0.1f, 0.16f), Vector3.zero);
+            CreatePrimitive("Pickup Shotgun Grip", PrimitiveType.Cube, theme.Wall, model, new Vector3(-0.32f, -0.2f, 0f), new Vector3(0.16f, 0.36f, 0.15f), new Vector3(0f, 0f, -24f));
+            CreatePrimitive("Pickup Shotgun Stock", PrimitiveType.Cube, theme.Wall, model, new Vector3(-0.52f, 0.02f, 0f), new Vector3(0.2f, 0.18f, 0.14f), Vector3.zero);
+            DroidRenderSetup.Apply(model.gameObject, StylizedOutlineCategory.Gun);
+            CreateGlowStand(parent, theme.NeonB, new Color(1f, 0.2f, 0.95f), 4.2f);
+        }
+
+        private static void BuildGrenadePickup(Transform parent, ArenaTheme theme)
+        {
+            var model = CreateModelRoot(parent);
+            if (GrenadeAsset.TryBuildPickupModel(model, theme))
+            {
+                CreateGlowStand(parent, theme.Scrap, new Color(1f, 0.62f, 0.1f), 4f);
+                return;
+            }
+
+            CreatePrimitive("Pickup Grenade Shell", PrimitiveType.Sphere, theme.Wall, model, new Vector3(0f, 0.08f, 0f), new Vector3(0.36f, 0.36f, 0.36f), Vector3.zero);
+            CreatePrimitive("Pickup Grenade Band", PrimitiveType.Cylinder, theme.NeonA, model, new Vector3(0f, 0.08f, 0f), new Vector3(0.38f, 0.035f, 0.38f), Vector3.zero);
+            CreatePrimitive("Pickup Grenade Cap", PrimitiveType.Cylinder, theme.Pillar, model, new Vector3(0f, 0.28f, 0f), new Vector3(0.12f, 0.05f, 0.12f), Vector3.zero);
+            DroidRenderSetup.Apply(model.gameObject, StylizedOutlineCategory.Gun);
+            CreateGlowStand(parent, theme.Scrap, new Color(1f, 0.62f, 0.1f), 4f);
         }
 
         public static void BuildHealthPickup(Transform parent, ArenaTheme theme)

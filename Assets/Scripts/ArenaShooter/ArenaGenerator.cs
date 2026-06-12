@@ -250,6 +250,8 @@ namespace ArenaShooter
             timer.Mark("tunnel mesh generation");
             CreateInvisibleCircularBoundary(root, layout.CircularCenter, layout.DomeRadius, wallHeight);
             timer.Mark("boundary geometry");
+            CreateHillScenery(theme, root, terrainProfile, random);
+            timer.Mark("hill scenery");
             generatingAllOutWar = false;
             activeAllOutWarTerrainProfile = null;
             return layout;
@@ -1948,6 +1950,240 @@ namespace ArenaShooter
             triangles.Add(c);
         }
 
+        // ------------------------------------------------------------------
+        // Hill scenery: crystal spires, neon palms, barricades, and foliage
+        // scattered on terrain-only hills so crests offer cover and interest.
+        // ------------------------------------------------------------------
+
+        private void CreateHillScenery(ArenaTheme theme, Transform root, AllOutWarTerrainProfile profile, System.Random random)
+        {
+            if (profile == null || !profile.HasTerrainOnlyHills)
+            {
+                return;
+            }
+
+            var sceneryRoot = new GameObject("Hill Scenery").transform;
+            sceneryRoot.SetParent(root, false);
+            var totalPlaced = 0;
+            foreach (var region in profile.TerrainOnlyHillRegions)
+            {
+                totalPlaced += PopulateHillScenery(theme, sceneryRoot, profile, region, random);
+            }
+
+            Debug.Log($"[Arena Shooter] Hill scenery placed {totalPlaced} props across {profile.TerrainOnlyHillRegionCount} hills.");
+        }
+
+        private int PopulateHillScenery(ArenaTheme theme, Transform parent, AllOutWarTerrainProfile profile, AllOutWarTerrainProfile.TerrainOnlyHillRegion region, System.Random random)
+        {
+            var placed = new List<(Vector2 Position, float Clearance)>();
+            var count = 0;
+            var crest = region.CrestRadius;
+            var slopeMax = Mathf.Lerp(crest, region.OuterRadius, 0.8f);
+
+            if (region.SizeClass == AllOutWarTerrainProfile.TerrainOnlyHillSizeClass.Large)
+            {
+                count += TryPlaceHillProp(theme, parent, profile, region, random, SceneryAsset.Kind.CrystalSpires, "tall spire", 0f, crest * 0.35f, false, 1.5f, 0.92f, 1.18f, placed) ? 1 : 0;
+                var palms = 1 + random.Next(2);
+                for (var i = 0; i < palms; i++)
+                {
+                    TryPlaceHillProp(theme, parent, profile, region, random, SceneryAsset.Kind.NeonPalm, random.NextDouble() < 0.5 ? "upright palm" : "leaning palm", crest * 0.55f, crest * 0.9f, false, 0.9f, 0.9f, 1.15f, placed);
+                    count++;
+                }
+
+                count += PlaceBarricadeRing(theme, parent, profile, region, random, 3 + random.Next(2), placed);
+                count += PlaceFoliage(theme, parent, profile, region, random, 6 + random.Next(4), crest * 0.5f, slopeMax, placed);
+            }
+            else if (region.SizeClass == AllOutWarTerrainProfile.TerrainOnlyHillSizeClass.Medium)
+            {
+                if (random.NextDouble() < 0.6)
+                {
+                    TryPlaceHillProp(theme, parent, profile, region, random, SceneryAsset.Kind.CrystalSpires, "twin shard", 0f, crest * 0.4f, false, 1.2f, 0.9f, 1.2f, placed);
+                }
+                else
+                {
+                    TryPlaceHillProp(theme, parent, profile, region, random, SceneryAsset.Kind.NeonPalm, "upright palm", 0f, crest * 0.45f, false, 0.9f, 0.9f, 1.15f, placed);
+                }
+
+                count++;
+                count += PlaceBarricadeRing(theme, parent, profile, region, random, 2 + random.Next(2), placed);
+                count += PlaceFoliage(theme, parent, profile, region, random, 4 + random.Next(3), crest * 0.45f, slopeMax, placed);
+            }
+            else
+            {
+                if (random.NextDouble() < 0.5)
+                {
+                    TryPlaceHillProp(theme, parent, profile, region, random, SceneryAsset.Kind.CrystalSpires, "shard bed", 0f, crest * 0.4f, false, 1.0f, 0.85f, 1.15f, placed);
+                }
+                else
+                {
+                    TryPlaceHillProp(theme, parent, profile, region, random, SceneryAsset.Kind.NeonPalm, "leaning palm", 0f, crest * 0.4f, false, 0.9f, 0.85f, 1.1f, placed);
+                }
+
+                count++;
+                count += PlaceBarricadeRing(theme, parent, profile, region, random, random.Next(2), placed);
+                count += PlaceFoliage(theme, parent, profile, region, random, 3 + random.Next(2), crest * 0.4f, slopeMax, placed);
+            }
+
+            return count;
+        }
+
+        private int PlaceBarricadeRing(ArenaTheme theme, Transform parent, AllOutWarTerrainProfile profile, AllOutWarTerrainProfile.TerrainOnlyHillRegion region, System.Random random, int targetCount, List<(Vector2 Position, float Clearance)> placed)
+        {
+            var placedCount = 0;
+            for (var i = 0; i < targetCount; i++)
+            {
+                var roll = random.NextDouble();
+                var kind = roll < 0.62 ? SceneryAsset.Kind.HexBarricade : SceneryAsset.Kind.ShieldBarrier;
+                var variant = kind == SceneryAsset.Kind.HexBarricade
+                    ? (roll < 0.34 ? "low wall" : "long wall")
+                    : "shield barrier";
+                if (TryPlaceHillProp(theme, parent, profile, region, random, kind, variant, region.CrestRadius * 0.78f, region.CrestRadius * 1.08f, true, 1.7f, 0.95f, 1.12f, placed))
+                {
+                    placedCount++;
+                }
+            }
+
+            return placedCount;
+        }
+
+        private int PlaceFoliage(ArenaTheme theme, Transform parent, AllOutWarTerrainProfile profile, AllOutWarTerrainProfile.TerrainOnlyHillRegion region, System.Random random, int targetCount, float radiusMin, float radiusMax, List<(Vector2 Position, float Clearance)> placed)
+        {
+            var placedCount = 0;
+            var variants = new[] { "glow tuft", "fan fern", "crystal sprout" };
+            for (var i = 0; i < targetCount; i++)
+            {
+                var variant = variants[random.Next(variants.Length)];
+                if (TryPlaceHillProp(theme, parent, profile, region, random, SceneryAsset.Kind.NeonFoliage, variant, radiusMin, radiusMax, false, 0.5f, 0.8f, 1.35f, placed))
+                {
+                    placedCount++;
+                }
+            }
+
+            return placedCount;
+        }
+
+        private bool TryPlaceHillProp(
+            ArenaTheme theme,
+            Transform parent,
+            AllOutWarTerrainProfile profile,
+            AllOutWarTerrainProfile.TerrainOnlyHillRegion region,
+            System.Random random,
+            SceneryAsset.Kind kind,
+            string variant,
+            float radiusMin,
+            float radiusMax,
+            bool faceOutward,
+            float clearance,
+            float scaleMin,
+            float scaleMax,
+            List<(Vector2 Position, float Clearance)> placed)
+        {
+            for (var attempt = 0; attempt < 8; attempt++)
+            {
+                var angle = (float)(random.NextDouble() * Mathf.PI * 2f);
+                var direction = new Vector2(Mathf.Sin(angle), Mathf.Cos(angle));
+                // respect elliptical crests so rings hug elongated hills
+                var crestScale = region.DirectionalCrestRadius(direction) / Mathf.Max(region.CrestRadius, 0.01f);
+                var distance = Mathf.Lerp(radiusMin, radiusMax, (float)random.NextDouble()) * crestScale;
+                var position = region.Center + direction * distance;
+
+                var rawHeight = region.SampleHeight(position);
+                var finalHeight = profile.SampleHeight(new Vector3(position.x, 0f, position.y));
+
+                // skip spots carved out by corridors, tunnels, spawn patches, or rooms
+                if (finalHeight < rawHeight - 0.35f)
+                {
+                    continue;
+                }
+
+                var minimumHeight = kind == SceneryAsset.Kind.NeonFoliage ? 0.1f : 0.25f;
+                if (rawHeight < minimumHeight)
+                {
+                    continue;
+                }
+
+                var blocked = false;
+                foreach (var existing in placed)
+                {
+                    if (Vector2.Distance(existing.Position, position) < clearance + existing.Clearance)
+                    {
+                        blocked = true;
+                        break;
+                    }
+                }
+
+                if (blocked)
+                {
+                    continue;
+                }
+
+                var wrapper = SceneryAsset.TryBuildVariant(parent, theme, kind, variant);
+                if (wrapper == null)
+                {
+                    return false;
+                }
+
+                var yaw = faceOutward
+                    ? Mathf.Atan2(direction.x, direction.y) * Mathf.Rad2Deg
+                    : (float)(random.NextDouble() * 360.0);
+                wrapper.transform.position = new Vector3(position.x, finalHeight - 0.05f, position.y);
+                wrapper.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+                wrapper.transform.localScale = Vector3.one * Mathf.Lerp(scaleMin, scaleMax, (float)random.NextDouble());
+                AddSceneryCollider(wrapper, kind, variant);
+                placed.Add((position, clearance));
+                return true;
+            }
+
+            return false;
+        }
+
+        private static void AddSceneryCollider(GameObject wrapper, SceneryAsset.Kind kind, string variant)
+        {
+            Vector3 center;
+            Vector3 size;
+            switch (kind)
+            {
+                case SceneryAsset.Kind.CrystalSpires when variant == "tall spire":
+                    center = new Vector3(0f, 1.5f, 0f);
+                    size = new Vector3(1.0f, 3.0f, 1.0f);
+                    break;
+                case SceneryAsset.Kind.CrystalSpires when variant == "twin shard":
+                    center = new Vector3(0f, 0.75f, 0f);
+                    size = new Vector3(1.0f, 1.5f, 1.0f);
+                    break;
+                case SceneryAsset.Kind.CrystalSpires:
+                    center = new Vector3(0f, 0.32f, 0f);
+                    size = new Vector3(0.95f, 0.64f, 0.95f);
+                    break;
+                case SceneryAsset.Kind.NeonPalm when variant == "leaning palm":
+                    center = new Vector3(0.4f, 1.05f, 0f);
+                    size = new Vector3(0.62f, 2.1f, 0.5f);
+                    break;
+                case SceneryAsset.Kind.NeonPalm:
+                    center = new Vector3(0f, 1.3f, 0f);
+                    size = new Vector3(0.42f, 2.6f, 0.42f);
+                    break;
+                case SceneryAsset.Kind.HexBarricade when variant == "long wall":
+                    center = new Vector3(0f, 0.45f, 0f);
+                    size = new Vector3(2.45f, 0.92f, 0.66f);
+                    break;
+                case SceneryAsset.Kind.HexBarricade:
+                    center = new Vector3(0f, 0.45f, 0f);
+                    size = new Vector3(1.55f, 0.92f, 0.66f);
+                    break;
+                case SceneryAsset.Kind.ShieldBarrier:
+                    center = new Vector3(0f, 0.62f, 0f);
+                    size = new Vector3(2.05f, 1.25f, 0.32f);
+                    break;
+                default:
+                    return; // foliage stays collision-free
+            }
+
+            var box = wrapper.AddComponent<BoxCollider>();
+            box.center = center;
+            box.size = size;
+        }
+
         private static Vector3 AddTerrainHeight(Vector3 position, AllOutWarTerrainProfile terrainProfile)
         {
             if (terrainProfile != null)
@@ -1988,7 +2224,7 @@ namespace ArenaShooter
             // this peak can host a hill-cut tunnel at any corridor width.
             private const float AllOutWarHillCutCapablePeakHeight = 5.75f;
 
-            private enum TerrainOnlyHillSizeClass
+            public enum TerrainOnlyHillSizeClass
             {
                 Compact,
                 Medium,
@@ -2037,6 +2273,7 @@ namespace ArenaShooter
             public bool UsesHillyProfile => mapStyle == AllOutWarMapStyle.Hilly || terrainOnlyHillRegions.Count > 0;
             public bool HasTerrainOnlyHills => terrainOnlyHillRegions.Count > 0;
             public int TerrainOnlyHillRegionCount => terrainOnlyHillRegions.Count;
+            public List<TerrainOnlyHillRegion> TerrainOnlyHillRegions => terrainOnlyHillRegions;
 
             private int reservationGridRadius = 8;
 
@@ -4207,7 +4444,7 @@ namespace ArenaShooter
                 }
             }
 
-            private readonly struct TerrainOnlyHillRegion
+            public readonly struct TerrainOnlyHillRegion
             {
                 public readonly Vector2 Center;
                 public readonly float PeakHeight;

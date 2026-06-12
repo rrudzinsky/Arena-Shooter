@@ -125,7 +125,7 @@ namespace ArenaShooter
             foreach (var renderer in instance.GetComponentsInChildren<Renderer>(true))
             {
                 var materials = renderer.sharedMaterials;
-                var material = ResolveThemeMaterial(theme);
+                var material = WeaponAssetStyling.ResolveThemeMaterial(renderer, instance.transform, theme);
                 for (var i = 0; i < materials.Length; i++)
                 {
                     materials[i] = material;
@@ -133,11 +133,6 @@ namespace ArenaShooter
 
                 renderer.sharedMaterials = materials;
             }
-        }
-
-        private static Material ResolveThemeMaterial(ArenaTheme theme)
-        {
-            return theme.Pickup;
         }
 
         private static void ApplyPistolOutlineOverrides(GameObject instance, bool viewModel)

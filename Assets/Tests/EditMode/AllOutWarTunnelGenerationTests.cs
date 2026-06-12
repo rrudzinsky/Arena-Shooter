@@ -1836,8 +1836,8 @@ public sealed class AllOutWarTunnelGenerationTests
             null,
             new object[] { 424242, RoomSize + CorridorLength, System.Enum.Parse(AllOutWarMapStyleType, "Hilly") },
             null);
-        var regionType = AllOutWarTerrainProfileType.GetNestedType("TerrainOnlyHillRegion", BindingFlags.NonPublic);
-        var sizeType = AllOutWarTerrainProfileType.GetNestedType("TerrainOnlyHillSizeClass", BindingFlags.NonPublic);
+        var regionType = AllOutWarTerrainProfileType.GetNestedType("TerrainOnlyHillRegion", BindingFlags.Public | BindingFlags.NonPublic);
+        var sizeType = AllOutWarTerrainProfileType.GetNestedType("TerrainOnlyHillSizeClass", BindingFlags.Public | BindingFlags.NonPublic);
         Assert.That(regionType, Is.Not.Null);
         Assert.That(sizeType, Is.Not.Null);
         var large = System.Enum.Parse(sizeType, "Large");

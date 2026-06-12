@@ -38,6 +38,10 @@ namespace ArenaShooter
         private InputAction lungeLeftAction;
         private InputAction lungeRightAction;
         private InputAction turretModeAction;
+        private InputAction swapWeaponAction;
+        private InputAction gunSlotOneAction;
+        private InputAction gunSlotTwoAction;
+        private InputAction grenadeAction;
         private float pitch;
         private float verticalVelocity;
         private float standingHeight = 1.9f;
@@ -114,6 +118,10 @@ namespace ArenaShooter
             lungeLeftAction.Enable();
             lungeRightAction.Enable();
             turretModeAction.Enable();
+            swapWeaponAction.Enable();
+            gunSlotOneAction.Enable();
+            gunSlotTwoAction.Enable();
+            grenadeAction.Enable();
         }
 
         private void OnDisable()
@@ -129,6 +137,10 @@ namespace ArenaShooter
             lungeLeftAction.Disable();
             lungeRightAction.Disable();
             turretModeAction.Disable();
+            swapWeaponAction.Disable();
+            gunSlotOneAction.Disable();
+            gunSlotTwoAction.Disable();
+            grenadeAction.Disable();
             DestroyTurretPreview();
             CancelVault();
         }
@@ -202,6 +214,7 @@ namespace ArenaShooter
 
             UpdateStanceInput();
             UpdateAbilityInput();
+            UpdateWeaponSelectionInput();
             UpdateAiming();
             UpdateViewModelState();
             UpdateMovement();
@@ -214,6 +227,29 @@ namespace ArenaShooter
             if (attackAction.IsPressed() && cameraPivot != null)
             {
                 weapons.TryFire(cameraPivot.position, cameraPivot.forward);
+            }
+
+            if (grenadeAction.WasPressedThisFrame() && cameraPivot != null)
+            {
+                weapons.TryThrowGrenade(cameraPivot.position, cameraPivot.forward);
+            }
+        }
+
+        private void UpdateWeaponSelectionInput()
+        {
+            if (swapWeaponAction.WasPressedThisFrame())
+            {
+                weapons.CycleActiveGun();
+            }
+
+            if (gunSlotOneAction.WasPressedThisFrame())
+            {
+                weapons.SelectGunSlot(0);
+            }
+
+            if (gunSlotTwoAction.WasPressedThisFrame())
+            {
+                weapons.SelectGunSlot(1);
             }
         }
 
@@ -892,6 +928,14 @@ namespace ArenaShooter
             turretModeAction = new InputAction("Turret Kit", InputActionType.Button, "<Keyboard>/4");
             turretModeAction.AddBinding("<Gamepad>/dpad/down");
 
+            swapWeaponAction = new InputAction("Swap Weapon", InputActionType.Button, "<Keyboard>/x");
+            swapWeaponAction.AddBinding("<Gamepad>/dpad/up");
+
+            gunSlotOneAction = new InputAction("Gun Slot 1", InputActionType.Button, "<Keyboard>/1");
+            gunSlotTwoAction = new InputAction("Gun Slot 2", InputActionType.Button, "<Keyboard>/2");
+
+            grenadeAction = new InputAction("Throw Grenade", InputActionType.Button, "<Keyboard>/g");
+            grenadeAction.AddBinding("<Gamepad>/dpad/right");
         }
     }
 }
