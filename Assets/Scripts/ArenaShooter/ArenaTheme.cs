@@ -18,6 +18,7 @@ namespace ArenaShooter
         public Material DroidArmor { get; }
         public Material DroidJoint { get; }
         public Material DroidEye { get; }
+        public Material DroidStatusLight { get; }
         public Material Pickup { get; }
         public Material Scrap { get; }
         public Material Health { get; }
@@ -40,6 +41,7 @@ namespace ArenaShooter
             DroidArmor = CreateLit("Synthwave Droid Matte Black Body", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             DroidJoint = CreateLit("Synthwave Droid Matte Black Joint", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             DroidEye = CreateLit("Synthwave Droid Matte Black Optic", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
+            DroidStatusLight = CreateUnlit("Droid Red Status Light", new Color(1.9f, 0.1f, 0.07f), new Color(1.9f, 0.1f, 0.07f));
             Pickup = CreateLit("Pickup Matte Black Body", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);
             Scrap = CreateLit("Gold Hot Scrap Metal", new Color(0.9f, 0.60f, 0.22f), new Color(1.6f, 0.72f, 0.08f), 0.9f, 0.28f);
             Health = CreateLit("Medical Matte Black Body", new Color(0.0015f, 0.001f, 0.004f), Color.black, 0f, 0f);

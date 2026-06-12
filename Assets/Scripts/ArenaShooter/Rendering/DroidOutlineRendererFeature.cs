@@ -58,6 +58,14 @@ namespace ArenaShooter.Rendering
             [Range(0f, 180f)] public float distanceFadeEnd;
             [Range(0f, 1f)] public float distantHardEdgeScale;
             [Range(0f, 1f)] public float distantGlowScale;
+            [Range(0f, 1f)] public float flowStrength;
+            [Range(0f, 200f)] public float flowSpeedPixelsPerSecond;
+            [Range(0f, 160f)] public float flowWavelengthPixels;
+            [Range(0f, 2f)] public float flowWigglePixels;
+            [Range(0f, 4f)] public float flowWiggleSpeed;
+            [Range(0f, 60f)] public float flowCloseStartMeters;
+            [Range(0f, 80f)] public float flowCloseEndMeters;
+            [Range(0f, 2f)] public float flowHotBoost;
 
             public OutlineBand(string name, uint renderingLayerMask, Color outlineColor)
             {
@@ -115,6 +123,44 @@ namespace ArenaShooter.Rendering
                 DistantHardEdgeScale = distantHardEdgeScale;
                 DistantGlowScale = distantGlowScale;
             }
+        }
+
+        // Liquid "life" energy flowing along the outline. Resolved separately from
+        // ResolvedOutlineStyle so reflection-pinned style tests keep their exact shape.
+        private readonly struct ResolvedOutlineFlowStyle
+        {
+            public readonly float Strength;
+            public readonly float SpeedPixelsPerSecond;
+            public readonly float WavelengthPixels;
+            public readonly float WigglePixels;
+            public readonly float WiggleSpeed;
+            public readonly float CloseStartMeters;
+            public readonly float CloseEndMeters;
+            public readonly float HotBoost;
+
+            public ResolvedOutlineFlowStyle(
+                float strength,
+                float speedPixelsPerSecond,
+                float wavelengthPixels,
+                float wigglePixels,
+                float wiggleSpeed,
+                float closeStartMeters,
+                float closeEndMeters,
+                float hotBoost)
+            {
+                Strength = strength;
+                SpeedPixelsPerSecond = speedPixelsPerSecond;
+                WavelengthPixels = wavelengthPixels;
+                WigglePixels = wigglePixels;
+                WiggleSpeed = wiggleSpeed;
+                CloseStartMeters = closeStartMeters;
+                CloseEndMeters = closeEndMeters;
+                HotBoost = hotBoost;
+            }
+
+            public bool IsActive =>
+                (Strength > 0.001f || WigglePixels > 0.001f) &&
+                CloseEndMeters > CloseStartMeters + 0.01f;
         }
 
         private const string MaskShaderName = "Hidden/ArenaShooter/DroidOutlineMask";
@@ -647,6 +693,7 @@ namespace ArenaShooter.Rendering
         private static OutlineBand CreateDefaultBand(string name, uint renderingLayerMask)
         {
             var style = CreateReferenceStyle(renderingLayerMask, null);
+            var flowStyle = CreateReferenceFlowStyle(renderingLayerMask);
             return new OutlineBand(name, renderingLayerMask, style.Color)
             {
                 hardEdgePixels = style.HardEdgePixels,
@@ -661,7 +708,15 @@ namespace ArenaShooter.Rendering
                 distanceFadeStart = style.DistanceFadeStart,
                 distanceFadeEnd = style.DistanceFadeEnd,
                 distantHardEdgeScale = style.DistantHardEdgeScale,
-                distantGlowScale = style.DistantGlowScale
+                distantGlowScale = style.DistantGlowScale,
+                flowStrength = flowStyle.Strength,
+                flowSpeedPixelsPerSecond = flowStyle.SpeedPixelsPerSecond,
+                flowWavelengthPixels = flowStyle.WavelengthPixels,
+                flowWigglePixels = flowStyle.WigglePixels,
+                flowWiggleSpeed = flowStyle.WiggleSpeed,
+                flowCloseStartMeters = flowStyle.CloseStartMeters,
+                flowCloseEndMeters = flowStyle.CloseEndMeters,
+                flowHotBoost = flowStyle.HotBoost
             };
         }
 
@@ -701,6 +756,7 @@ namespace ArenaShooter.Rendering
                 if (settings.useReferenceNeonStyle)
                 {
                     var reference = CreateReferenceStyle(band.renderingLayerMask, settings);
+                    var referenceFlow = CreateReferenceFlowStyle(band.renderingLayerMask);
                     band.outlineColor = reference.Color;
                     band.hardEdgePixels = reference.HardEdgePixels;
                     band.glowPixels = reference.GlowPixels;
@@ -715,6 +771,14 @@ namespace ArenaShooter.Rendering
                     band.distanceFadeEnd = reference.DistanceFadeEnd;
                     band.distantHardEdgeScale = reference.DistantHardEdgeScale;
                     band.distantGlowScale = reference.DistantGlowScale;
+                    band.flowStrength = referenceFlow.Strength;
+                    band.flowSpeedPixelsPerSecond = referenceFlow.SpeedPixelsPerSecond;
+                    band.flowWavelengthPixels = referenceFlow.WavelengthPixels;
+                    band.flowWigglePixels = referenceFlow.WigglePixels;
+                    band.flowWiggleSpeed = referenceFlow.WiggleSpeed;
+                    band.flowCloseStartMeters = referenceFlow.CloseStartMeters;
+                    band.flowCloseEndMeters = referenceFlow.CloseEndMeters;
+                    band.flowHotBoost = referenceFlow.HotBoost;
                     continue;
                 }
 
@@ -881,8 +945,8 @@ namespace ArenaShooter.Rendering
             {
                 return new ResolvedOutlineStyle(
                     DroidRenderSetup.ResolveOutlineColor(StylizedOutlineCategory.Droid),
-                    1.25f,
-                    2.25f,
+                    1.05f,
+                    2.0f,
                     0.78f,
                     0.22f,
                     1.0f,
@@ -1006,6 +1070,43 @@ namespace ArenaShooter.Rendering
                 fadeEnd,
                 distantHard,
                 distantGlow);
+        }
+
+        private static ResolvedOutlineFlowStyle CreateReferenceFlowStyle(uint renderingLayerMask)
+        {
+            if (renderingLayerMask == DroidRenderSetup.DroidRenderingLayer)
+            {
+                // The droids' life-blood: liquid gold streaming along their edge lines,
+                // with a gentle alive wiggle. A close-range detail by design - full
+                // strength inside ~6m, completely static beyond ~14m so distant thin
+                // lines never shimmer.
+                return new ResolvedOutlineFlowStyle(0.55f, 42f, 36f, 0.9f, 1.25f, 6f, 14f, 0.7f);
+            }
+
+            return default;
+        }
+
+        private static ResolvedOutlineFlowStyle ResolveOutlineFlowStyle(OutlineSettings settings, OutlineBand band)
+        {
+            if (settings == null || settings.useReferenceNeonStyle)
+            {
+                return CreateReferenceFlowStyle(band != null ? band.renderingLayerMask : 0u);
+            }
+
+            if (band == null)
+            {
+                return default;
+            }
+
+            return new ResolvedOutlineFlowStyle(
+                band.flowStrength,
+                band.flowSpeedPixelsPerSecond,
+                band.flowWavelengthPixels,
+                band.flowWigglePixels,
+                band.flowWiggleSpeed,
+                band.flowCloseStartMeters,
+                band.flowCloseEndMeters,
+                band.flowHotBoost);
         }
 
         private static Vector4 CreateDistanceParams(OutlineSettings settings, OutlineBand band)
@@ -1469,6 +1570,9 @@ namespace ArenaShooter.Rendering
             private static readonly int OutlineParamsId = Shader.PropertyToID("_OutlineParams");
             private static readonly int OutlineStyleParamsId = Shader.PropertyToID("_OutlineStyleParams");
             private static readonly int OutlineDistanceParamsId = Shader.PropertyToID("_OutlineDistanceParams");
+            private static readonly int OutlineFlowParamsId = Shader.PropertyToID("_OutlineFlowParams");
+            private static readonly int OutlineFlowParams2Id = Shader.PropertyToID("_OutlineFlowParams2");
+            private static readonly int FlowEnabledId = Shader.PropertyToID("_FlowEnabled");
             private static readonly int WeaponOccluderTextureId = Shader.PropertyToID("_DroidOutlineWeaponOccluderTex");
             private static readonly int SuppressByWeaponOccluderId = Shader.PropertyToID("_SuppressByWeaponOccluder");
             private static readonly int OutsideOnlyAlphaEdgeId = Shader.PropertyToID("_OutsideOnlyAlphaEdge");
@@ -1559,6 +1663,22 @@ namespace ArenaShooter.Rendering
                             Mathf.Max(0f, style.HardEdgeStrength),
                             Mathf.Clamp01(style.AlphaEdgeStrength)));
                     material.SetVector(OutlineDistanceParamsId, CreateDistanceParams(settings, band));
+                    var flowStyle = ResolveOutlineFlowStyle(settings, band);
+                    material.SetVector(
+                        OutlineFlowParamsId,
+                        new Vector4(
+                            flowStyle.Strength,
+                            flowStyle.SpeedPixelsPerSecond,
+                            flowStyle.WavelengthPixels,
+                            flowStyle.WigglePixels));
+                    material.SetVector(
+                        OutlineFlowParams2Id,
+                        new Vector4(
+                            flowStyle.WiggleSpeed,
+                            flowStyle.HotBoost,
+                            flowStyle.CloseStartMeters,
+                            flowStyle.CloseEndMeters));
+                    material.SetInt(FlowEnabledId, flowStyle.IsActive ? 1 : 0);
 
                     Blitter.BlitCameraTexture(cmd, cameraColor, copyTexture);
                     Blitter.BlitCameraTexture(cmd, copyTexture, cameraColor, material, 0);
@@ -1640,6 +1760,18 @@ namespace ArenaShooter.Rendering
                         Mathf.Max(0f, style.HardEdgeStrength),
                         Mathf.Clamp01(style.AlphaEdgeStrength));
                     passData.distanceParams = CreateDistanceParams(settings, band);
+                    var flowStyle = ResolveOutlineFlowStyle(settings, band);
+                    passData.flowParams = new Vector4(
+                        flowStyle.Strength,
+                        flowStyle.SpeedPixelsPerSecond,
+                        flowStyle.WavelengthPixels,
+                        flowStyle.WigglePixels);
+                    passData.flowParams2 = new Vector4(
+                        flowStyle.WiggleSpeed,
+                        flowStyle.HotBoost,
+                        flowStyle.CloseStartMeters,
+                        flowStyle.CloseEndMeters);
+                    passData.flowEnabled = flowStyle.IsActive ? 1 : 0;
 
                     builder.UseTexture(sourceCopy, AccessFlags.Read);
                     builder.UseTexture(mask, AccessFlags.Read);
@@ -1674,6 +1806,9 @@ namespace ArenaShooter.Rendering
                         context.cmd.SetGlobalVector(OutlineParamsId, data.outlineParams);
                         context.cmd.SetGlobalVector(OutlineStyleParamsId, data.styleParams);
                         context.cmd.SetGlobalVector(OutlineDistanceParamsId, data.distanceParams);
+                        context.cmd.SetGlobalVector(OutlineFlowParamsId, data.flowParams);
+                        context.cmd.SetGlobalVector(OutlineFlowParams2Id, data.flowParams2);
+                        context.cmd.SetGlobalInt(FlowEnabledId, data.flowEnabled);
                         Blitter.BlitTexture(context.cmd, data.source, new Vector4(1f, 1f, 0f, 0f), data.material, 0);
                     });
                 }
@@ -1694,6 +1829,9 @@ namespace ArenaShooter.Rendering
                 public Vector4 outlineParams;
                 public Vector4 styleParams;
                 public Vector4 distanceParams;
+                public Vector4 flowParams;
+                public Vector4 flowParams2;
+                public int flowEnabled;
                 public int diagnosticMode;
                 public int applyMatteScene;
                 public int outsideOnlyAlphaEdge;

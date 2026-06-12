@@ -40,6 +40,7 @@ namespace ArenaShooter
             ImportedModelUtility.TryNormalizeRendererBounds(wrapper, instance.transform, TargetDroidMaxDimension, DiagnosticLabel);
             ApplyThemeMaterials(wrapper, theme);
             DroidRenderSetup.Apply(wrapper);
+            ApplyStatusLightRenderingOverrides(wrapper);
             ImportedModelUtility.LogModelInstanceDiagnostics(DiagnosticLabel, wrapper);
 
             if (!HasUsableVisibleRenderer(wrapper))
@@ -81,13 +82,32 @@ namespace ArenaShooter
         {
             foreach (var renderer in instance.GetComponentsInChildren<Renderer>(true))
             {
+                var material = IsRedStatusLight(renderer) ? theme.DroidStatusLight : ResolveThemeMaterial(theme);
                 var materials = renderer.sharedMaterials;
                 for (var i = 0; i < materials.Length; i++)
                 {
-                    materials[i] = ResolveThemeMaterial(theme);
+                    materials[i] = material;
                 }
 
                 renderer.sharedMaterials = materials;
+            }
+        }
+
+        private static bool IsRedStatusLight(Renderer renderer)
+        {
+            return renderer != null && renderer.name.ToLowerInvariant().Contains("red status");
+        }
+
+        // The status light renders emissive red on the Default layer (weapon glow lens
+        // precedent) so the droid outline band cannot wrap it in a gold ring.
+        private static void ApplyStatusLightRenderingOverrides(GameObject instance)
+        {
+            foreach (var renderer in instance.GetComponentsInChildren<Renderer>(true))
+            {
+                if (IsRedStatusLight(renderer))
+                {
+                    renderer.renderingLayerMask = DroidRenderSetup.DefaultRenderingLayer;
+                }
             }
         }
 
